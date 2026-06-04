@@ -31,9 +31,18 @@ class BasalGanglia(Region):
 
     # ── direct path: habit-fire from compiled skills ─────────────────────────
     def propose_habit(self, ws: Workspace,
-                      skills: Optional[SkillStore]) -> Optional[dict]:
+                      skills: Optional[SkillStore],
+                      cerebellum: Optional["Cerebellum"] = None,  # type: ignore[name-defined]
+                      cerebellum_min_conf: float = 0.18) -> Optional[dict]:
         """Return an action dict {effector, args, reasoning} fireable now,
         or None to fall through to the prefrontal (System-2). No LLM call.
+
+        When a cerebellum is provided, its fast forward-model prediction
+        gates the habit-fire decision: if it predicts FAILURE for this
+        (state, action) — or its confidence is too low — the habit is
+        suppressed and we fall back to System-2. This is the brain's
+        learned 'this won't work here' veto, distinct from the BG's
+        affect-based gate.
         """
         if skills is None:
             return None
@@ -47,13 +56,33 @@ class BasalGanglia(Region):
             return None
         if not _habit_conditions_met(ws):
             return None
-        return {
+
+        # Cerebellum check (fast, no LLM)
+        cb_pred = None
+        if cerebellum is not None:
+            cb_pred = cerebellum.quick_predict(ws, skill.effector, skill.args)
+            if cb_pred.is_useful:
+                # A confident prediction of FAILURE blocks the habit
+                if not cb_pred.predicted_ok and cb_pred.confidence >= cerebellum_min_conf:
+                    return None
+                # A very-low-confidence prediction also blocks: if the
+                # cerebellum can't say anything useful, defer to PFC.
+                if cb_pred.confidence < cerebellum_min_conf * 0.5:
+                    return None
+
+        proposal = {
             "effector": skill.effector,
             "args": skill.args,
-            "reasoning": f"(habit, conf={skill.confidence:.2f}, uses={skill.uses})",
+            "reasoning": f"(habit, conf={skill.confidence:.2f}, uses={skill.uses}"
+                          + (f", cb_pred={cb_pred.predicted_outcome[:60]}"
+                             if cb_pred and cb_pred.is_useful else "")
+                          + ")",
             "_skill_id": skill.id,
             "_skill_confidence": skill.confidence,
         }
+        if cb_pred is not None:
+            proposal["_cerebellum_prediction"] = cb_pred.to_dict()
+        return proposal
 
     def step(self, ws: Workspace, proposal: dict) -> Broadcast:
         a = ws.affect

@@ -13,14 +13,18 @@ from .config import Config
 class LLM:
     def __init__(self, cfg: Config):
         self.cfg = cfg
+        # Headers are provider-driven: omit Authorization for local endpoints
+        # that don't require it (Ollama, LM Studio, llama.cpp …). extra_headers
+        # is whatever the profile asked for (OpenRouter wants HTTP-Referer +
+        # X-Title; locals usually want nothing).
+        headers: dict[str, str] = {}
+        if cfg.require_auth and cfg.api_key:
+            headers["Authorization"] = f"Bearer {cfg.api_key}"
+        headers.update(cfg.extra_headers or {})
         self._client = httpx.Client(
             base_url=cfg.base_url,
             timeout=cfg.timeout_seconds,
-            headers={
-                "Authorization": f"Bearer {cfg.api_key}",
-                "HTTP-Referer": "https://localhost/brain",
-                "X-Title": "brain",
-            },
+            headers=headers,
         )
 
     def close(self) -> None:

@@ -6,8 +6,19 @@
 specter_env: "~/specter/.env"
 
 openrouter:
-  base_url: "https://openrouter.ai/api/v1"
+  # `provider` selects a built-in profile: openrouter (default, remote, paid),
+  # ollama (local, http://localhost:11434/v1), lmstudio (local, :1234),
+  # vllm (local, :8000), llamacpp (local, :8080), or custom (set base_url
+  # yourself). Profile defaults can be overridden by setting base_url /
+  # require_auth / api_key_env / extra_headers directly.
+  provider: "openrouter"
+  # base_url: "http://localhost:11434/v1"      # only needed for provider=custom
+  # require_auth: false                         # locals usually don't need a key
+  # api_key_env: "OPENROUTER_API_KEY"           # which env var to read
+  # extra_headers: {}                           # OpenRouter wants HTTP-Referer + X-Title; default profile sets them
+
   # Two model tiers. Reflex = fast/cheap regions; executive = slow/strong regions.
+  # For provider=ollama, use Ollama model ids (e.g. "llama3.2:3b", "qwen2.5:7b").
   models:
     reflex: "google/gemini-3.1-flash-lite-preview"   # from ~/specter/.env LLM_MODEL
     executive: "qwen/qwen3.7-plus"                     # stronger model for planning

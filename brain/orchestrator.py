@@ -43,6 +43,7 @@ from .regions import (
     Amygdala,
     BasalGanglia,
     Broca,
+    Cerebellum,
     DefaultMode,
     Hippocampus,
     Interoception,
@@ -110,6 +111,11 @@ class Brain:
             self.default_mode = DefaultMode(cfg, self.llm, seed=seed)
             self.locus_coeruleus = LocusCoeruleus(cfg, self.llm)
             self.vta = VTA(cfg, self.llm)
+        # Cerebellum: deterministic, no LLM. Always built (cheap), always
+        # reads the world model. Lives outside the humanize switch because
+        # it's the fast path for habit-fire decisions either way.
+        self.cerebellum = Cerebellum(cfg, self.llm,
+                                       world_model=self.world_model)
 
         # Seed memory with persona priors
         if persona is not None:
@@ -212,7 +218,8 @@ class Brain:
             # psychological conditions allow (no interrupt, low surprise,
             # cognitive load, low curiosity), we skip the prefrontal entirely.
             ws.habit_fired = False
-            habit_proposal = self.basal_ganglia.propose_habit(ws, self.skills)
+            habit_proposal = self.basal_ganglia.propose_habit(
+                ws, self.skills, cerebellum=self.cerebellum)
             if habit_proposal is not None:
                 self.log(f"  ⚡ habit fires (no PFC): {habit_proposal['effector']} "
                          f"{habit_proposal['reasoning']}")

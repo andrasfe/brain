@@ -1011,5 +1011,246 @@ class DaemonStateMachineTests(unittest.TestCase):
             brain.close()
 
 
+class LocalLLMConfigTests(unittest.TestCase):
+    """Provider profiles + local-LLM endpoint resolution."""
+
+    def _write_cfg(self, body: str) -> Path:
+        tmp = Path(tempfile.mkdtemp()) / "config.yaml"
+        tmp.write_text(body)
+        return tmp
+
+    def test_ollama_profile_skips_auth(self):
+        from brain.config import load_config
+        p = self._write_cfg("""
+openrouter:
+  provider: ollama
+  models:
+    reflex: "llama3.2:3b"
+    executive: "qwen2.5:7b"
+sandbox_dir: "/tmp/brain-test-sb"
+memory:
+  db_path: "/tmp/brain-test-mem.sqlite3"
+""")
+        cfg = load_config(p)
+        self.assertEqual(cfg.base_url, "http://localhost:11434/v1")
+        self.assertFalse(cfg.require_auth)
+        self.assertEqual(cfg.api_key, "")
+        self.assertEqual(cfg.models["reflex"], "llama3.2:3b")
+
+    def test_lmstudio_profile(self):
+        from brain.config import load_config
+        p = self._write_cfg("""
+openrouter:
+  provider: lmstudio
+  models:
+    reflex: "qwen-7b"
+    executive: "qwen-32b"
+sandbox_dir: "/tmp/brain-test-sb"
+memory:
+  db_path: "/tmp/brain-test-mem.sqlite3"
+""")
+        cfg = load_config(p)
+        self.assertEqual(cfg.base_url, "http://localhost:1234/v1")
+        self.assertFalse(cfg.require_auth)
+
+    def test_custom_provider_requires_base_url(self):
+        from brain.config import load_config
+        p = self._write_cfg("""
+openrouter:
+  provider: custom
+  models: {reflex: "x", executive: "y"}
+sandbox_dir: "/tmp/brain-test-sb"
+memory:
+  db_path: "/tmp/brain-test-mem.sqlite3"
+""")
+        with self.assertRaises(RuntimeError):
+            load_config(p)
+
+    def test_openrouter_profile_still_requires_auth(self):
+        from brain.config import load_config
+        # Stash and remove the env var
+        import os
+        saved = os.environ.pop("OPENROUTER_API_KEY", None)
+        try:
+            p = self._write_cfg("""
+openrouter:
+  provider: openrouter
+  models: {reflex: "x", executive: "y"}
+sandbox_dir: "/tmp/brain-test-sb"
+memory:
+  db_path: "/tmp/brain-test-mem.sqlite3"
+""")
+            with self.assertRaises(RuntimeError):
+                load_config(p)
+        finally:
+            if saved is not None:
+                os.environ["OPENROUTER_API_KEY"] = saved
+
+    def test_llm_client_omits_auth_header_for_local_provider(self):
+        """LLM constructor with require_auth=False should not send
+        Authorization: Bearer header. We inspect the httpx client's
+        default headers."""
+        from brain.config import Config
+        from brain.llm import LLM
+        cfg = Config(
+            raw={}, api_key="", base_url="http://localhost:11434/v1",
+            require_auth=False, extra_headers={},
+            models={"reflex": "x", "executive": "y"},
+            timeout_seconds=10, max_retries=0,
+            sandbox_dir=Path(tempfile.mkdtemp()),
+            db_path=Path(tempfile.mkdtemp()) / "m.sqlite",
+            loop={}, memory={}, effectors={}, regions={},
+        )
+        llm = LLM(cfg)
+        try:
+            headers = {k.lower(): v for k, v in llm._client.headers.items()}
+            self.assertNotIn("authorization", headers)
+        finally:
+            llm.close()
+
+    def test_llm_client_sets_auth_when_required(self):
+        from brain.config import Config
+        from brain.llm import LLM
+        cfg = Config(
+            raw={}, api_key="sk-test", base_url="https://api.example.com/v1",
+            require_auth=True,
+            extra_headers={"X-Title": "brain"},
+            models={"reflex": "x", "executive": "y"},
+            timeout_seconds=10, max_retries=0,
+            sandbox_dir=Path(tempfile.mkdtemp()),
+            db_path=Path(tempfile.mkdtemp()) / "m.sqlite",
+            loop={}, memory={}, effectors={}, regions={},
+        )
+        llm = LLM(cfg)
+        try:
+            headers = {k.lower(): v for k, v in llm._client.headers.items()}
+            self.assertEqual(headers.get("authorization"), "Bearer sk-test")
+            self.assertEqual(headers.get("x-title"), "brain")
+        finally:
+            llm.close()
+
+
+class CerebellumTests(unittest.TestCase):
+    """Fast deterministic forward model — pure k-NN, no LLM."""
+
+    def _wm_with_data(self, rows):
+        from brain.world_model import WorldModelStore
+        tmp = Path(tempfile.mkdtemp()) / "wm.sqlite"
+        wm = WorldModelStore(tmp)
+        for r in rows:
+            wm.observe(**r)
+        return wm
+
+    def _cerebellum(self, wm):
+        from brain.config import Config
+        from brain.regions.cerebellum import Cerebellum
+        cfg = Config(
+            raw={}, api_key="", base_url="http://x",
+            require_auth=False, extra_headers={},
+            models={"reflex": "x", "executive": "y"},
+            timeout_seconds=10, max_retries=0,
+            sandbox_dir=Path(tempfile.mkdtemp()),
+            db_path=Path(tempfile.mkdtemp()) / "m.sqlite",
+            loop={}, memory={}, effectors={},
+            regions={"cerebellum": "reflex"},
+        )
+        return Cerebellum(cfg, llm=None, world_model=wm)
+
+    def _ws_with_percept(self, goal: str, entities: list[str]):
+        ws = Workspace(task=goal)
+        from brain.workspace import Broadcast
+        ws.post(Broadcast(source="sensory_cortex", kind="percept",
+                          content=f"goal={goal}", salience=0.9,
+                          data={"goal": goal, "entities": entities,
+                                 "constraints": [], "success_criterion": "x"}))
+        return ws
+
+    def test_predicts_outcome_from_similar_past_action(self):
+        wm = self._wm_with_data([
+            {"state_text": "goal=write primes script; mood=curious",
+             "action_text": "write_file(content=primes, path=primes.py)",
+             "outcome_text": "wrote 42 bytes to primes.py", "ok": True},
+            {"state_text": "goal=write fibonacci script; mood=curious",
+             "action_text": "write_file(content=fib, path=fib.py)",
+             "outcome_text": "wrote 35 bytes to fib.py", "ok": True},
+        ])
+        cb = self._cerebellum(wm)
+        ws = self._ws_with_percept("write a math script", ["python", "primes"])
+        pred = cb.quick_predict(ws, "write_file",
+                                 {"content": "p2", "path": "p2.py"})
+        self.assertTrue(pred.is_useful)
+        self.assertTrue(pred.predicted_ok)
+        self.assertIn("wrote", pred.predicted_outcome)
+        wm.close()
+
+    def test_no_world_model_yields_empty_prediction(self):
+        from brain.config import Config
+        from brain.regions.cerebellum import Cerebellum
+        cfg = Config(
+            raw={}, api_key="", base_url="http://x", require_auth=False,
+            extra_headers={}, models={"reflex": "x", "executive": "y"},
+            timeout_seconds=10, max_retries=0,
+            sandbox_dir=Path(tempfile.mkdtemp()),
+            db_path=Path(tempfile.mkdtemp()) / "m.sqlite",
+            loop={}, memory={}, effectors={},
+            regions={"cerebellum": "reflex"},
+        )
+        cb = Cerebellum(cfg, llm=None, world_model=None)
+        ws = self._ws_with_percept("x", [])
+        pred = cb.quick_predict(ws, "write_file", {})
+        self.assertEqual(pred.n_matches, 0)
+        self.assertFalse(pred.is_useful)
+
+    def test_bg_habit_fire_suppressed_when_cerebellum_predicts_failure(self):
+        from brain.skills import SkillStore
+        from brain.regions.basal_ganglia import BasalGanglia
+        from brain.affect import Traits
+        # World model where the same action FAILED in similar state
+        wm = self._wm_with_data([
+            {"state_text": "goal=clean tmp dir; mood=neutral",
+             "action_text": "shell(command=rm -rf tmp)",
+             "outcome_text": "error: permission denied", "ok": False},
+            {"state_text": "goal=clean tmp dir; mood=neutral",
+             "action_text": "shell(command=rm -rf tmp)",
+             "outcome_text": "error: permission denied", "ok": False},
+            {"state_text": "goal=clean tmp dir; mood=neutral",
+             "action_text": "shell(command=rm -rf tmp)",
+             "outcome_text": "error: permission denied", "ok": False},
+        ])
+        cb = self._cerebellum(wm)
+        # Make a skill that the BG would otherwise fire
+        sk_path = Path(tempfile.mkdtemp()) / "s.sqlite"
+        skills = SkillStore(sk_path)
+        # Derive the signature the same way the BG will at propose-time so the
+        # skill matches the percept exactly (avoid hand-coded format drift).
+        from brain.skills import signature_from_percept
+        percept_data = {"goal": "clean tmp dir", "entities": ["tmp"]}
+        sig = signature_from_percept(percept_data, None)
+        skills.consolidate(sig, "shell", {"command": "rm -rf tmp"}, ok=True)
+        skills.consolidate(sig, "shell", {"command": "rm -rf tmp"}, ok=True)
+        # Build a workspace that satisfies _habit_conditions_met
+        ws = self._ws_with_percept("clean tmp dir", ["tmp"])
+        ws.affect.stress = 0.6  # cognitive-load regime → habits favored
+        ws.affect.traits = Traits(conscientiousness=0.3)
+        ws.last_surprise = 0.0
+        # Without cerebellum, habit fires; with it, suppressed by predicted failure
+        from brain.config import Config
+        cfg = Config(
+            raw={}, api_key="", base_url="http://x", require_auth=False,
+            extra_headers={}, models={"reflex": "x", "executive": "y"},
+            timeout_seconds=10, max_retries=0,
+            sandbox_dir=Path(tempfile.mkdtemp()),
+            db_path=Path(tempfile.mkdtemp()) / "m.sqlite",
+            loop={}, memory={}, effectors={},
+            regions={"basal_ganglia": "reflex"},
+        )
+        bg = BasalGanglia(cfg, llm=MagicMock())
+        without = bg.propose_habit(ws, skills, cerebellum=None)
+        self.assertIsNotNone(without)
+        with_cb = bg.propose_habit(ws, skills, cerebellum=cb)
+        self.assertIsNone(with_cb)
+        wm.close(); skills.close()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -280,17 +280,28 @@ either recovers ("Forget the cat; …") or drifts.
     against invented effectors — if kind=action with an effector not in the
     available list, it's demoted to `tentative_plan` rather than dispatched.
   - **`basal_ganglia.py`** — TWO roles, matching real BG circuitry:
-    - **`propose_habit(ws, skills)` (direct path, System-1)**: consulted by
-      the orchestrator *before* the prefrontal speaks. Returns a cached
-      action dict from the SkillStore if a fireable skill matches the
-      current percept signature AND `_habit_conditions_met(ws)` allows
+    - **`propose_habit(ws, skills, cerebellum=None)` (direct path, System-1)**:
+      consulted by the orchestrator *before* the prefrontal speaks. Returns
+      a cached action dict from the SkillStore if a fireable skill matches
+      the current percept signature AND `_habit_conditions_met(ws)` allows
       (no amygdala interrupt, low recent surprise, not in exploration mode,
-      cognitive load OR low conscientiousness OR neutral baseline). On hit,
-      the action fires with NO LLM call.
+      cognitive load OR low conscientiousness OR neutral baseline) AND
+      the cerebellum's fast forward-model prediction doesn't veto. On hit,
+      the action fires with NO LLM call. The cerebellum veto is the brain's
+      learned "this won't work here" signal, distinct from affect-based gating.
     - **`step(ws, proposal)` (indirect path, System-2)**: gates an
       already-proposed action. Mood-modulated: high reward tone loosens
       vetoes (impulsivity), high conscientiousness tightens, high
       agreeableness vetoes potential harm.
+  - **`cerebellum.py`** — fast deterministic forward model. NEVER calls
+    the LLM. `quick_predict(ws, effector, args)` returns a
+    `CerebellumPrediction` (predicted outcome text, confidence in [0,1],
+    predicted ok, n_matches, top similarity) from k-NN over
+    `WorldModelStore`. Consulted by basal ganglia during `propose_habit`
+    (suppresses habit-fire on predicted failure or low confidence), and
+    available to the prefrontal as a no-LLM `expected_result` default.
+    This is the brain's load-bearing fast path for streaming / local-LLM
+    deployments where every LLM call costs seconds.
   - **`broca.py`** — language production at the end; voice instructions shaped
     by current mood (clipped under stress, warmer under positive valence, blunt
     when agreeableness low). First-person.
@@ -349,6 +360,18 @@ either recovers ("Forget the cat; …") or drifts.
 ## Configuration (`config.yaml`)
 
 - `specter_env` — where to load `OPENROUTER_API_KEY` from (`~/specter/.env`).
+- `openrouter.provider` — selects a built-in endpoint profile:
+  - `openrouter` (default, remote, requires `OPENROUTER_API_KEY`)
+  - `ollama` (local, `http://localhost:11434/v1`, no auth)
+  - `lmstudio` (local, `:1234`, no auth)
+  - `vllm` (local, `:8000`, no auth)
+  - `llamacpp` (local, `:8080`, no auth)
+  - `custom` (you set `base_url` / `require_auth` / `api_key_env` / `extra_headers`)
+  Profile defaults can be overridden by setting any of those keys directly
+  under `openrouter:`. The `LLM` and `OpenRouterBackend` clients drop the
+  Authorization header when `require_auth=false`, so local stacks just
+  work. Model IDs follow each provider's convention (e.g. `llama3.2:3b`
+  for Ollama, `openai/text-embedding-3-small` for OpenRouter embeddings).
 - `openrouter.models.{reflex,executive}` — the two model tiers.
   - reflex default: `google/gemini-3.1-flash-lite-preview` (from `.env`).
   - executive default: `qwen/qwen3.7-plus`.

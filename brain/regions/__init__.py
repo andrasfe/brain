@@ -9,6 +9,7 @@ from .interoception import Interoception
 from .default_mode import DefaultMode
 from .locus_coeruleus import LocusCoeruleus
 from .vta import VTA
+from .cerebellum import Cerebellum, CerebellumPrediction
 
 __all__ = [
     "SensoryCortex",
@@ -21,4 +22,6 @@ __all__ = [
     "DefaultMode",
     "LocusCoeruleus",
     "VTA",
+    "Cerebellum",
+    "CerebellumPrediction",
 ]
