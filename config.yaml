@@ -1,0 +1,47 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# brain — a multi-agent model of cognition (Global Workspace Theory)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Where to load OpenRouter credentials from. Expanded with ~.
+specter_env: "~/specter/.env"
+
+openrouter:
+  base_url: "https://openrouter.ai/api/v1"
+  # Two model tiers. Reflex = fast/cheap regions; executive = slow/strong regions.
+  models:
+    reflex: "google/gemini-3.1-flash-lite-preview"   # from ~/specter/.env LLM_MODEL
+    executive: "qwen/qwen3.7-plus"                     # stronger model for planning
+  timeout_seconds: 120
+  max_retries: 2
+
+# Sandbox: every effector is confined to this directory (created if missing).
+sandbox_dir: "~/brain/workspace"
+
+# The reactive cognitive loop.
+loop:
+  max_cycles: 12          # hard cap on cognitive cycles per task
+  attention_decay: 0.85   # how fast un-rebroadcast items lose salience each cycle
+
+memory:
+  db_path: "~/brain/memory.sqlite3"
+  retrieve_k: 5           # episodes pulled into the workspace per retrieval
+
+effectors:
+  filesystem:
+    enabled: true
+  shell:
+    enabled: true
+    require_confirmation: true   # prompt before running shell commands
+    timeout_seconds: 30
+  web:
+    enabled: true
+    timeout_seconds: 30
+
+# Region → tier assignment. Tweak freely.
+regions:
+  sensory_cortex: reflex
+  amygdala:       reflex
+  basal_ganglia:  reflex
+  hippocampus:    reflex
+  prefrontal:     executive
+  broca:          executive
