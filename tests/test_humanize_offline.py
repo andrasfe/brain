@@ -665,6 +665,136 @@ class StreamOfThoughtTests(unittest.TestCase):
         self.assertIn("default_mode", second_prompt)
 
 
+class WorldModelTests(unittest.TestCase):
+    """k-NN over (state, action, outcome) in the configured embedding space."""
+
+    def _fresh(self):
+        from brain.world_model import WorldModelStore
+        tmp = Path(tempfile.mkdtemp()) / "wm.sqlite"
+        return WorldModelStore(tmp)
+
+    def test_action_overlap_same_effector(self):
+        from brain.world_model import _action_overlap
+        # Same effector + shared arg token → high
+        s1 = _action_overlap("write_file(path=foo.py, content=def main)",
+                              "write_file(path=foo.py, content=other)")
+        self.assertGreater(s1, 0.3)
+        # Different effector → zero
+        s2 = _action_overlap("write_file(path=foo)", "shell(command=foo)")
+        self.assertEqual(s2, 0.0)
+
+    def test_observe_and_predict_finds_similar_state(self):
+        wm = self._fresh()
+        wm.observe(
+            state_text="goal=write primes script; mood=curious",
+            action_text="write_file(content=primes, path=primes.py)",
+            outcome_text="wrote 42 bytes to primes.py", ok=True,
+        )
+        wm.observe(
+            state_text="goal=write fibonacci script; mood=curious",
+            action_text="write_file(content=fib, path=fib.py)",
+            outcome_text="wrote 35 bytes to fib.py", ok=True,
+        )
+        wm.observe(
+            state_text="goal=delete temp files; mood=neutral",
+            action_text="shell(command=rm tmp/*)",
+            outcome_text="(exit 0)", ok=True,
+        )
+        hits = wm.predict(
+            state_text="goal=write a math script; mood=curious",
+            action_text="write_file(content=math, path=math.py)",
+            k=2,
+        )
+        self.assertTrue(hits)
+        # The matched rows should be the two write_file events, not the shell one
+        verbs = {h["action_text"].split("(")[0] for h in hits}
+        self.assertEqual(verbs, {"write_file"})
+        wm.close()
+
+    def test_predict_filters_by_action_verb(self):
+        wm = self._fresh()
+        wm.observe("similar state here", "write_file(path=a)", "ok", True)
+        wm.observe("similar state here", "shell(command=ls)", "list", True)
+        # Query with shell action — must not return the write_file row
+        hits = wm.predict("similar state here", "shell(command=cat foo)", k=3)
+        self.assertTrue(all(h["action_text"].startswith("shell") for h in hits))
+        wm.close()
+
+    def test_counterfactuals_excludes_same_action(self):
+        wm = self._fresh()
+        wm.observe("morning; goal=reply to email", "write_file(path=reply.txt)",
+                   "wrote", True)
+        wm.observe("morning; goal=reply to email",
+                   "shell(command=send_mail draft.txt)", "sent", True)
+        cf = wm.counterfactuals("morning; goal=reply to email",
+                                 current_action="write_file(path=anything)",
+                                 k=2)
+        self.assertTrue(cf)
+        # All counterfactuals must have a DIFFERENT effector
+        self.assertTrue(all(not h["action_text"].startswith("write_file")
+                            for h in cf))
+        wm.close()
+
+    def test_persistent_backend_caches_state_embedding(self):
+        """A persistent backend's encode_one is called on observe(); a
+        second pass with a fresh backend reuses the cached BLOB."""
+        from brain.world_model import WorldModelStore
+        from brain.embeddings import EmbeddingBackend, _pack_floats, _unpack_floats
+
+        class _Toy(EmbeddingBackend):
+            name = "toy"; persistent = True
+            def __init__(self):
+                self._vecs = {}; self._fitted = False; self.encode_calls = 0
+            def _embed(self, t):
+                # 4D from word lengths
+                ws = t.split()[:4]
+                return [float(len(w)) for w in ws] + [0.0] * (4 - len(ws[:4]))
+            def fit(self, docs):
+                docs = list(docs)
+                for did, text in docs:
+                    if did in self._vecs: continue
+                    self._vecs[did] = self._embed(text)
+                    self.encode_calls += 1
+                self._fitted = True
+            def topk(self, q, k, eligible=None):
+                if not self._fitted: return []
+                qv = self._embed(q); import math
+                qn = math.sqrt(sum(x*x for x in qv))
+                if qn == 0: return []
+                out = []
+                for did, v in self._vecs.items():
+                    if eligible is not None and did not in eligible: continue
+                    dn = math.sqrt(sum(x*x for x in v))
+                    if dn == 0: continue
+                    dot = sum(a*b for a,b in zip(qv, v))
+                    out.append((did, dot/(qn*dn)))
+                out.sort(key=lambda x: x[1], reverse=True)
+                return out[:k]
+            def encode_one(self, t):
+                self.encode_calls += 1
+                return _pack_floats(self._embed(t))
+            def from_bytes(self, b): return _unpack_floats(b)
+            def remember(self, did, v): self._vecs[did] = v
+
+        tmp = Path(tempfile.mkdtemp()) / "wm.sqlite"
+        wm1 = WorldModelStore(tmp, backend=_Toy())
+        wm1.observe("alpha beta", "shell(command=alpha)", "ok", True)
+        wm1.observe("alpha gamma", "shell(command=beta)", "ok", True)
+        first_encodes = wm1.backend.encode_calls
+        self.assertGreater(first_encodes, 0)
+        wm1.close()
+
+        wm2 = WorldModelStore(tmp, backend=_Toy())
+        # A predict() call forces _fit_backend which loads cached BLOBs
+        wm2.predict("alpha beta", "shell(command=test)", k=2)
+        # The toy backend's encode_calls should be near zero — fit() didn't
+        # re-encode existing rows (BLOBs were preloaded via remember()).
+        # We expect zero encodes for known rows; topk's _embed of the query
+        # is not counted by encode_calls (we only count fit/encode_one).
+        self.assertEqual(wm2.backend.encode_calls, 0)
+        wm2.close()
+
+
 class SleepAgentsTests(unittest.TestCase):
     """Each sleep agent in isolation against an in-memory DB."""
 

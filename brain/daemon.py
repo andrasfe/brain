@@ -277,6 +277,7 @@ class BrainDaemon:
                 stats = self.dreamer.run(
                     self.brain.memory, self.brain.llm,
                     model=self.cfg.models.get("reflex"),
+                    world_model=self.brain.world_model,
                     log=lambda m: self.log(f"  {m}"),
                 )
                 self.stats.dreams_written += stats.get("written", 0)

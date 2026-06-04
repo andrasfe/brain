@@ -184,11 +184,15 @@ either recovers ("Forget the cat; …") or drifts.
   from sleep via the scheduler agent.
 
 - **`brain/sleep/`** — sleep-only agents, each owning ONE job:
-  - `dreamer.py` (REM): samples DISTANT memory pairs (low TF-IDF cosine);
-    LLM produces one connecting hypothesis / metaphor / "what if"; written
-    back as low-confidence `mem_type=semantic` with `tags=['dream']`.
-    Selection pressure (forgetter + future corroboration) decides which
-    dreams persist.
+  - `dreamer.py` (REM): two lanes. (1) Samples DISTANT memory pairs (low
+    TF-IDF cosine); LLM produces one connecting hypothesis / metaphor /
+    "what if"; written back as low-confidence `mem_type=semantic` with
+    `tags=['dream']`. (2) When a `WorldModelStore` is provided, samples
+    real `(state, action, outcome)` triples and queries the world model's
+    `counterfactuals()` for similar-state-but-different-action alternates;
+    LLM produces "what would have happened if I'd done Y" hypotheses,
+    written with `tags=['counterfactual', 'dream']`. Selection pressure
+    (forgetter + future corroboration) decides which dreams persist.
   - `forgetter.py` (NREM): deletes low-salience old episodic rows. Never
     touches `prior:*` persona facts, semantic/affect/source rows, or the
     most recent N episodic rows (recency safety net).
@@ -208,6 +212,22 @@ either recovers ("Forget the cat; …") or drifts.
   contexts: (a) at end of `Brain.run(task)` as a small cheap pass (≤ 2
   facts), (b) standalone CLI `python -m brain.consolidator` for the deeper
   sleep sweep over accumulated runs.
+
+- **`brain/world_model.py`** — `WorldModelStore`: the brain's learned
+  forward model. SQLite-backed (shares the memory db) k-NN over
+  `(state_text, action_text, outcome_text)` triples in the embedding
+  backend's latent space. Three methods: `observe(...)` (writes a triple
+  with optional cached state embedding), `predict(state, action, k)`
+  (returns top-k past outcomes for the most similar state when the action
+  has matching effector + arg overlap), `counterfactuals(state, current_action, k)`
+  (returns top-k similar-state-but-different-action triples — the dreamer's
+  REM substrate). `render_state(workspace)` is the canonical embeddable
+  description of "what state was I in" (goal + entities + spotlight + mood
+  + interrupt). The orchestrator writes an observation after every executed
+  action (habit-fire and PFC paths both), with salience scaled by surprise
+  so high-prediction-error rows are weighted more in future ranking. This
+  is the LeCun-aligned piece: predictions live in a *learned* latent space
+  and improve with data, not with prompt tuning.
 
 - **`brain/skills.py`** — `SkillStore` (the procedural-memory / System-1
   substrate) + `signature_from_percept` + `prediction_surprise`.
@@ -251,9 +271,14 @@ either recovers ("Forget the cat; …") or drifts.
     action, finish, tangent}. For action units it also emits an
     `expected_result` (~15 words) used as the **top-down prediction** in
     predictive coding — the orchestrator scores actual-vs-expected after the
-    action runs and surprise feeds back to LC arousal. Guards against
-    invented effectors — if kind=action with an effector not in the available
-    list, it's demoted to `tentative_plan` rather than dispatched.
+    action runs and surprise feeds back to LC arousal. When a
+    `WorldModelStore` is passed in (orchestrator does this), the PFC first
+    queries it with a *speculative action* derived from the recent chain
+    and threads the top-2 learned outcomes into the prompt as 'last time
+    you saw this state and did X, the result was Y' — so the predictions
+    that drive predictive coding are **learned**, not invented. Guards
+    against invented effectors — if kind=action with an effector not in the
+    available list, it's demoted to `tentative_plan` rather than dispatched.
   - **`basal_ganglia.py`** — TWO roles, matching real BG circuitry:
     - **`propose_habit(ws, skills)` (direct path, System-1)**: consulted by
       the orchestrator *before* the prefrontal speaks. Returns a cached

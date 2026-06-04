@@ -20,6 +20,7 @@ from typing import List, Optional
 
 from ..region import Region
 from ..workspace import Broadcast, ThoughtUnit, Workspace
+from ..world_model import render_state
 
 
 # Allowed thought kinds. Keep the schema small.
@@ -42,8 +43,18 @@ class Prefrontal(Region):
         "'tentative_plan', or 'tangent'."
     )
 
-    def next_thought(self, ws: Workspace, effectors: List[str]) -> ThoughtUnit:
-        """Generate the next unit of the autoregressive thought chain."""
+    def next_thought(self, ws: Workspace, effectors: List[str],
+                     world_model=None) -> ThoughtUnit:
+        """Generate the next unit of the autoregressive thought chain.
+
+        If a `world_model` (WorldModelStore) is provided, the PFC peeks at
+        the learned forward model BEFORE composing this thought. When the
+        spotlight indicates an action is likely (recent tentative_plan,
+        nothing on the stack, etc.), the WM is queried with the current
+        state and the most-likely action; the top matches are surfaced in
+        the prompt as 'last time you saw this state and did X, the result
+        was Y'. That makes `expected_result` a *learned* prediction, not a
+        guess from text alone."""
         a = ws.affect
         step = len(ws.thought_chain) + 1
 
@@ -60,6 +71,33 @@ class Prefrontal(Region):
             "Either pick up where you left off, or let it pull you."
             if recent_intrusion else ""
         )
+
+        # ── world-model peek (the learned-prediction lane) ─────────────────
+        wm_hint = ""
+        if world_model is not None and effectors:
+            # Query speculatively against the most-likely effector — the
+            # last action verb we've considered, or the first non-internal
+            # effector. The result is a *cue* to the prompt, not a commit.
+            speculative_action = _speculative_action(ws, effectors)
+            if speculative_action:
+                state_text = render_state(ws)
+                try:
+                    hits = world_model.predict(state_text, speculative_action,
+                                                 k=2, min_score=0.08)
+                except Exception:
+                    hits = []
+                if hits:
+                    lines = []
+                    for h in hits[:2]:
+                        outcome = (h.get("outcome_text") or "")[:100]
+                        lines.append(
+                            f"  - past similar state + {h['action_text'][:50]} "
+                            f"→ {'ok' if h.get('ok') else 'ERR'}: {outcome} "
+                            f"(sim={h['score']:.2f})")
+                    wm_hint = ("\nLEARNED FORWARD MODEL (k-NN over past "
+                               "experience):\n" + "\n".join(lines) +
+                               "\nIf you emit kind='action', let these "
+                               "ground your `expected_result`.")
 
         # Be explicit about whether external actions are even possible. If the
         # only available effectors are think/finish, the model should NOT
@@ -84,7 +122,7 @@ class Prefrontal(Region):
 
         prompt = (
             ws.render_context(limit=8) + "\n\n"
-            f"{voice}{intrusion_hint}\n\n"
+            f"{voice}{intrusion_hint}{wm_hint}\n\n"
             f"{action_rules}\n"
             "Effector arg schemas:\n"
             "  read_file{path}; write_file{path,content}; list_dir{path};\n"
@@ -172,6 +210,20 @@ def _voice_line(a, interrupt: Optional[str]) -> str:
     if a.curiosity > 0.7 and a.stress < 0.5:
         bits.append("Curious — willing to look something up.")
     return " ".join(bits)
+
+
+def _speculative_action(ws: Workspace, effectors: List[str]) -> str:
+    """Best guess at the next action verb for world-model peek. Uses the
+    last tentative_plan / action in the thought chain whose effector is in
+    the available list; otherwise empty."""
+    from ..world_model import render_action
+    for t in reversed(ws.thought_chain):
+        args = t.args or {}
+        eff = args.get("effector") or t.kind
+        inner = args.get("args") or {}
+        if eff in effectors and eff not in ("think", "finish"):
+            return render_action(eff, inner if isinstance(inner, dict) else {})
+    return ""
 
 
 def _last_intrusion(chain: List[ThoughtUnit]) -> Optional[ThoughtUnit]:

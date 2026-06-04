@@ -38,6 +38,7 @@ from .llm import LLM
 from .memory import EPISODIC, Memory, SEMANTIC
 from .persona import Persona, load_persona
 from .skills import SkillStore, prediction_surprise, signature_from_percept
+from .world_model import WorldModelStore, render_action, render_state
 from .regions import (
     Amygdala,
     BasalGanglia,
@@ -78,6 +79,10 @@ class Brain:
         # The skill store shares the memory db on purpose: skills are a kind
         # of procedural memory and persist across runs alongside episodes.
         self.skills = SkillStore(cfg.db_path)
+        # World model — k-NN over (state, action, outcome) in the configured
+        # embedding space. The PFC consults it to ground its expected_result
+        # predictions; the orchestrator writes a row after every action.
+        self.world_model = WorldModelStore(cfg.db_path, backend=backend)
         # Effectors get a memory handle so `remind_self` can register
         # prospective items the hippocampus will surface later.
         self.effectors = Effectors(cfg, confirm=confirm, memory=self.memory)
@@ -114,6 +119,7 @@ class Brain:
         self.llm.close()
         self.memory.close()
         self.skills.close()
+        self.world_model.close()
 
     def _seed_persona_memory(self, persona: Persona) -> None:
         for seed in persona.memory_seeds():
@@ -211,6 +217,12 @@ class Brain:
                 self.log(f"  ⚡ habit fires (no PFC): {habit_proposal['effector']} "
                          f"{habit_proposal['reasoning']}")
                 ws.habit_fired = True
+                # Capture state-at-decision BEFORE we mutate workspace with
+                # the synthetic action ThoughtUnit, so the world-model row
+                # reflects the moment the action was selected.
+                _wm_state = render_state(ws)
+                _wm_action = render_action(habit_proposal["effector"],
+                                            habit_proposal["args"])
                 # Append a synthetic ThoughtUnit so the chain still reads as
                 # a continuous stream (BG-sourced, kind=action).
                 ws.thought_chain.append(ThoughtUnit(
@@ -243,6 +255,14 @@ class Brain:
                 # Skill update on the habit-fire outcome itself
                 sig = ws.last_habit_signature or "<unknown>"
                 self.skills.consolidate(sig, eff, args, ok, outcome=result)
+                # World-model observation: the habit-fire is real experience
+                # too. Salience is mild because no surprise to learn from.
+                try:
+                    self.world_model.observe(
+                        _wm_state, _wm_action, result, ok=ok,
+                        source="observed", salience=0.5)
+                except Exception as e:  # noqa: BLE001 — never fail a run
+                    self.log(f"  ⚠ world_model.observe skipped: {e}")
                 if not ok:
                     # The cached habit failed — decay its confidence so the
                     # next encounter falls back to System-2.
@@ -262,7 +282,9 @@ class Brain:
                 continue
 
             # ── prefrontal next thought (the autoregressive step) ──────────
-            unit = self.prefrontal.next_thought(ws, self.effectors.available())
+            unit = self.prefrontal.next_thought(
+                ws, self.effectors.available(),
+                world_model=self.world_model)
             self.log(f"  • thought[{unit.step:02d} {unit.kind}]"
                      f"{' ⟪after intrusion⟫' if unit.interrupted else ''}: "
                      f"{unit.content[:100]}")
@@ -295,6 +317,11 @@ class Brain:
 
                 eff = gate.data.get("effector", proposal["effector"])
                 args = gate.data.get("args") or proposal["args"]
+
+                # Capture state-at-decision BEFORE acting (the WM row should
+                # describe the situation that LED to this choice).
+                _wm_state = render_state(ws)
+                _wm_action = render_action(eff, args)
 
                 ok, result = self.effectors.execute(eff, args)
                 self.log(f"  ▶ {eff} -> {'ok' if ok else 'ERR'}: {result[:80]}")
@@ -356,6 +383,17 @@ class Brain:
                 sig = signature_from_percept(
                     (percept.data if percept else {}) or {}, ws.interrupt)
                 self.skills.consolidate(sig, eff, args, ok, outcome=result)
+
+                # ── world-model observation (LeCun-style passive learning) ──
+                # Salience scaled by surprise so high-prediction-error
+                # observations are weighted more in future predict() ranking.
+                try:
+                    wm_sal = 0.45 + 0.5 * max(0.0, surprise)
+                    self.world_model.observe(
+                        _wm_state, _wm_action, result, ok=ok,
+                        source="observed", salience=min(0.95, wm_sal))
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"  ⚠ world_model.observe skipped: {e}")
 
                 self.hippocampus.consolidate(
                     ws, kind="action",
