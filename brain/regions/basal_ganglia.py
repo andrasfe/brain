@@ -108,14 +108,17 @@ class BasalGanglia(Region):
             gate_mood.append("tired: less patience to repair args — more likely to "
                              "go or veto on intuition.")
 
+        avail = list((proposal.get("args") or {}).keys())  # unused — for future
         out = self._chat_json(
             ws.render_context() + "\n\n"
             f"Proposed action: {proposal}\n"
             + (("Gate mood: " + " ".join(gate_mood) + "\n") if gate_mood else "")
-            + "\nGate it. Return JSON: "
-            '{"decision": "go|no_go", "reason": "brief, in first person", '
-            '"effector": str, "args": {...}}  '
-            "(echo/repair effector+args when decision is go).",
+            + "\nGate it. Return JSON shaped EXACTLY like:\n"
+            '{"decision": "go|no_go", "reason": "brief, in first person",\n'
+            ' "effector": "<exact name; echo or repair, do not invent verbs>",\n'
+            ' "args": {<args for the effector>}}\n'
+            "If you repair `effector`, it must be one of the proposal's "
+            "available verbs — never a free-form phrase like 'go for a walk'.",
             temperature=0.2 + 0.25 * a.arousal,
         )
         go = out.get("decision") == "go"

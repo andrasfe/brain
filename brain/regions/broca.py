@@ -26,15 +26,72 @@ class Broca(Region):
         ) or "(no external actions were taken)"
         af = ws.affect
         voice = _broca_voice(af)
-        return self._chat(
+        # Use chat_json so reasoning models can't leak their full chain-of-
+        # thought into the final user-facing answer. We pull only the
+        # `answer` field; chat_json's retry handles parse failures.
+        out = self._chat_json(
             f"Original task:\n{ws.task}\n\n"
             f"Conscious workspace:\n{ws.render_context(limit=20)}\n\n"
             f"Actions taken:\n{actions}\n\n"
             f"Voice instructions: {voice}\n\n"
-            "Write the final answer.",
+            "Return JSON: "
+            '{"answer": "the final user-facing answer, no meta-commentary, '
+            'no reasoning narration, no constraint checklists — just the '
+            'message you are giving the user, written in first person."}',
             temperature=0.55 + 0.25 * af.arousal,
-            max_tokens=1500,
+            max_tokens=2000,
         )
+        text = (out.get("answer") or "").strip()
+        if text:
+            return text
+        # Fall back: if JSON parse failed entirely, extract a clean answer
+        # from the raw text rather than handing back the whole reasoning
+        # monologue. Prefers the last well-formed paragraph block.
+        raw = (out.get("_raw") or "").strip()
+        return _extract_final_answer(raw) if raw else "(no answer)"
+
+
+import re
+
+
+_REASONING_PARA = re.compile(
+    r"^\s*(\d+[.)]\s|[\*\-\+]\s|step\s+\d|process:|analyze\b|"
+    r"all constraints|check\b|verify\b|deconstruct|thinking process|"
+    r"self-correction|let me check|let's verify|output matches)",
+    re.IGNORECASE,
+)
+
+
+def _extract_final_answer(text: str) -> str:
+    """Heuristic: from a reasoning-model chain-of-thought leaking into the
+    output, pull the actual final draft. Tries marker-based extraction
+    first, then walks paragraphs from the end picking the last that doesn't
+    look like a reasoning step."""
+    if not text:
+        return ""
+    # Marker-based extraction — many reasoning models gate their final
+    # answer behind labels like "Draft:" / "Output:" / "Final Answer:".
+    for marker in ("**final answer:**", "**draft:**", "**output:**",
+                    "**answer:**", "final answer:", "output:", "draft:",
+                    "answer:"):
+        idx = text.lower().rfind(marker)
+        if idx != -1:
+            tail = text[idx + len(marker):].strip()
+            # Strip leading/trailing quotes and code fences
+            tail = tail.strip("`").strip('"').strip("'").strip()
+            if tail:
+                return tail
+    # Paragraph-walk fallback
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    for p in reversed(paragraphs):
+        if _REASONING_PARA.match(p):
+            continue
+        # Short bookkeeping lines like "All good." aren't the answer
+        if len(p) < 60 and re.match(r"^(all|done|good|proceeds|ok|✅)", p, re.I):
+            continue
+        return p
+    # Last resort — return the whole thing
+    return text.strip()
 
 
 def _broca_voice(a) -> str:

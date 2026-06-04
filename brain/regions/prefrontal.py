@@ -126,34 +126,73 @@ class Prefrontal(Region):
             f"{action_rules}\n"
             "Effector arg schemas:\n"
             "  read_file{path}; write_file{path,content}; list_dir{path};\n"
-            "  shell{command}; web_fetch{url}; think{note}; finish{answer}\n\n"
+            "  shell{command}; web_fetch{url}; think{note};\n"
+            "  remind_self{content, trigger, pattern}; finish{answer}\n\n"
             f"Produce the NEXT single thought-unit (step {step}) in your inner "
-            "monologue. Keep it short (one or two sentences). Return JSON: "
-            '{"content": "the thought, first person", '
-            '"kind": "reflect|recall|appraise|tentative_plan|action|finish|tangent", '
-            '"args": {} (only if kind=action or finish), '
-            '"expected_result": "if kind=action, ~15 words predicting what the '
-            'effector will return — used for surprise / predictive-coding signal. '
-            'Omit for non-action kinds.", '
-            '"confidence": 0.0-1.0}'
+            "monologue. Keep `content` to 1-2 sentences; do not narrate your "
+            "reasoning in `content`. Return JSON shaped EXACTLY like:\n"
+            '{"content": "the thought, first person, 1-2 sentences",\n'
+            ' "kind": "reflect|recall|appraise|tentative_plan|action|finish|tangent",\n'
+            ' "effector": "<exact name from the available list — ONLY when kind=action>",\n'
+            ' "args": {<args for the effector, or {} for finish>},\n'
+            ' "expected_result": "~15 words predicting effector result; omit for non-action",\n'
+            ' "confidence": 0.0-1.0}\n'
+            "The `effector` field must be exactly one of the available names — "
+            "DO NOT invent verbs (no 'go for a walk', no 'send_text', no "
+            "'shut_laptop'). To rehearse an action mentally, use "
+            "kind='tentative_plan' and put the draft in `content`."
         )
-        out = self._chat_json(prompt, temperature=temp, max_tokens=600)
+        # qwen-35b a3b and other reasoning models need more room: they
+        # frequently exhaust 600 tokens on chain-of-thought before emitting
+        # the JSON. 1500 gives reasoning headroom; chat_json's retry handles
+        # the tail-of-the-distribution failures.
+        out = self._chat_json(prompt, temperature=temp, max_tokens=1500)
 
         kind = str(out.get("kind") or "reflect").strip().lower()
         if kind not in _KINDS:
             kind = "reflect"
         content = (out.get("content") or "").strip()
+        # Fall back: when content is empty but the model produced raw text
+        # (e.g. reasoning-content overflow), use a short slice of that as
+        # the thought rather than a "(blank thought)" placeholder.
+        if not content:
+            raw = (out.get("_raw") or "").strip()
+            if raw:
+                # Take the last non-trivial sentence as the thought
+                import re as _re
+                sents = [s.strip() for s in _re.split(r"(?<=[.!?])\s+", raw)
+                          if 12 < len(s.strip()) < 240]
+                if sents:
+                    content = sents[-1]
         if not content:
             content = "(blank thought)"
 
-        # Guard: if model emitted kind='action' but the effector isn't in the
-        # available list, demote to 'tentative_plan' rather than execute a
-        # made-up verb. The chain keeps moving; no fake action gets dispatched.
+        # Effector resolution — accept multiple JSON shapes the model might
+        # emit (top-level `effector`, nested `args.effector`, or `args.name`).
+        # If kind=='action' but the resolved effector isn't in the available
+        # list, demote to 'tentative_plan' so no bogus verb gets dispatched.
         if kind == "action":
-            requested = ((out.get("args") or {}).get("effector")
-                         or (out.get("args") or {}).get("name") or "")
-            if str(requested) not in effectors:
+            requested = _resolve_effector(out)
+            if requested not in effectors:
                 kind = "tentative_plan"
+            else:
+                # Normalize the unit args so the orchestrator's lookups work:
+                # unit.args["effector"] holds the verb, unit.args["args"]
+                # holds the verb's own args.
+                raw_args = out.get("args")
+                inner = raw_args.get("args") if isinstance(raw_args, dict) else {}
+                # Pull common nested forms (effector args under the effector
+                # name, e.g. args.shell.command). Best-effort.
+                if isinstance(raw_args, dict) and not inner:
+                    nested = raw_args.get(requested)
+                    if isinstance(nested, dict):
+                        inner = nested
+                    elif isinstance(raw_args, dict):
+                        # Default: take all non-effector keys as the args
+                        inner = {k: v for k, v in raw_args.items()
+                                 if k not in ("effector", "name")}
+                out["args"] = {"effector": requested,
+                                "args": inner if isinstance(inner, dict) else {}}
 
         unit = ThoughtUnit(
             step=step,
@@ -210,6 +249,28 @@ def _voice_line(a, interrupt: Optional[str]) -> str:
     if a.curiosity > 0.7 and a.stress < 0.5:
         bits.append("Curious — willing to look something up.")
     return " ".join(bits)
+
+
+def _resolve_effector(out: dict) -> str:
+    """Extract an effector verb from a thought-unit response, tolerating
+    several shapes the model might emit. Returns "" if nothing parseable."""
+    # Top-level field
+    top = out.get("effector")
+    if isinstance(top, str) and top.strip():
+        return top.strip()
+    args = out.get("args")
+    if isinstance(args, dict):
+        for key in ("effector", "name", "verb", "action"):
+            v = args.get(key)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+    # args as bare string (some models do this)
+    if isinstance(args, str) and args.strip():
+        # First token (verbs are short) — but only if it looks plausible
+        first = args.strip().split()[0]
+        if first.isidentifier() and len(first) <= 32:
+            return first
+    return ""
 
 
 def _speculative_action(ws: Workspace, effectors: List[str]) -> str:

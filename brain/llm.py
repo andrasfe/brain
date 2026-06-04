@@ -78,15 +78,53 @@ class LLM:
         temperature: float = 0.3,
         max_tokens: int = 1024,
     ) -> dict[str, Any]:
-        """Chat expecting a single JSON object back. Tolerant of code fences/prose."""
+        """Chat expecting a single JSON object back. Tolerant of code fences/prose.
+
+        Reasoning models (Nemotron, qwen3 a3b, DeepSeek-R1, …) emit verbose
+        chain-of-thought before any JSON; when their token budget gets
+        clipped mid-reasoning, no JSON is produced at all and the parser
+        returns `_parse_error`. We retry ONCE with 3× the budget and a
+        stricter system prompt that pushes the model toward emitting the
+        JSON object first (or at least surviving its reasoning to get there).
+        """
+        json_directive = (
+            "\n\nRespond with a single valid JSON object and nothing else."
+        )
         raw = self.chat(
             model,
-            system + "\n\nRespond with a single valid JSON object and nothing else.",
+            system + json_directive,
             user,
             temperature=temperature,
             max_tokens=max_tokens,
         )
-        return _extract_json(raw)
+        parsed = _extract_json(raw)
+        if not parsed.get("_parse_error"):
+            # Attach raw text on success too — callers (e.g. prefrontal's
+            # empty-content fallback) can recover something usable when a
+            # reasoning model emitted JSON with blank fields.
+            parsed.setdefault("_raw", raw)
+            return parsed
+
+        # Retry: bigger budget, sterner instruction, lower temperature.
+        strict_directive = (
+            "\n\nYou MUST emit exactly one JSON object and nothing else. "
+            "Do not narrate your reasoning. Do not include preface text, "
+            "code fences, or trailing commentary. Output starts with '{' "
+            "and ends with '}'."
+        )
+        raw2 = self.chat(
+            model,
+            system + strict_directive,
+            user,
+            temperature=max(0.0, temperature - 0.2),
+            max_tokens=max(max_tokens, max_tokens * 3),
+        )
+        parsed2 = _extract_json(raw2)
+        if not parsed2.get("_parse_error"):
+            return parsed2
+        # Still failed — surface the first attempt's raw text since it
+        # tends to be more informative for debugging.
+        return parsed
 
 
 def _extract_json(text: str) -> dict[str, Any]:

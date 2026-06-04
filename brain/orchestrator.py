@@ -325,6 +325,22 @@ class Brain:
                 eff = gate.data.get("effector", proposal["effector"])
                 args = gate.data.get("args") or proposal["args"]
 
+                # Defense-in-depth: BG can "repair" effector and sometimes
+                # repairs it INTO a bogus verb (e.g. "go for a walk" rather
+                # than a real effector name). Validate before dispatch and
+                # downgrade to 'think' if it isn't a registered effector.
+                # We post a workspace broadcast so the trace shows it.
+                if eff not in self.effectors.available():
+                    self.log(f"  ⚠ invalid effector after BG: {eff!r} → think")
+                    ws.post(Broadcast(
+                        source="orchestrator", kind="invalid_effector",
+                        content=f"invalid effector dropped: {eff!r} "
+                                 "(downgraded to think)",
+                        salience=0.5,
+                    ))
+                    args = {"note": f"intended: {eff} {args}"}
+                    eff = "think"
+
                 # Capture state-at-decision BEFORE acting (the WM row should
                 # describe the situation that LED to this choice).
                 _wm_state = render_state(ws)
@@ -412,11 +428,13 @@ class Brain:
             ws.affect.decay_toward_baseline()
 
         # ── speak ──
+        # Broca always runs. The PFC's `finish` with args.answer is a
+        # commitment hint, NOT the user-facing answer — Broca produces
+        # mood-colored prose over the whole thought chain. (The hint is
+        # already visible to Broca via render_context's thought-chain
+        # lines, so we don't need to thread it explicitly.)
         self.log(f"\n⟶ synthesizing final answer (broca)  [{ws.affect.render()}]")
-        if ws.final_output:
-            answer = ws.final_output
-        else:
-            answer = self.broca.step(ws)
+        answer = self.broca.step(ws)
         self.hippocampus.consolidate(ws, kind="outcome",
                                       content=answer[:500], salience=0.7)
 
