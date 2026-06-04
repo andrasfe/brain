@@ -308,7 +308,7 @@ class TypedMemoryTests(unittest.TestCase):
     def _fresh(self):
         from brain.memory import Memory
         tmp = Path(tempfile.mkdtemp()) / "m.sqlite"
-        return Memory(tmp, tfidf_refit_every=2)
+        return Memory(tmp, refit_every=2)
 
     def test_typed_store_and_retrieve(self):
         from brain.memory import EPISODIC, SEMANTIC, AFFECT
@@ -463,6 +463,107 @@ class ConsolidatorTests(unittest.TestCase):
         self.assertTrue(sem)
         self.assertIn("quoting", sem[0]["content"].lower())
         m.close()
+
+
+class EmbeddingBackendTests(unittest.TestCase):
+    """Pluggable embedding backends + Memory persistence cache."""
+
+    def test_pack_unpack_floats(self):
+        from brain.embeddings import _pack_floats, _unpack_floats
+        v = [0.1, -0.5, 0.97, 1.4, -1e-3]
+        blob = _pack_floats(v)
+        back = _unpack_floats(blob)
+        self.assertEqual(len(back), len(v))
+        for a, b in zip(v, back):
+            self.assertAlmostEqual(a, b, places=5)
+
+    def test_factory_defaults_to_tfidf_with_no_neural_options(self):
+        from brain.embeddings import make_backend, TfidfBackend
+        # A cfg-like stub with no llm and no model — factory must not crash
+        class StubCfg:
+            memory = {"embedding_backend": "tfidf"}
+        bk = make_backend(StubCfg(), llm=None)
+        self.assertIsInstance(bk, TfidfBackend)
+
+    def test_factory_explicit_openrouter_requires_llm_and_model(self):
+        from brain.embeddings import make_backend
+        class StubCfg:
+            memory = {"embedding_backend": "openrouter"}
+        with self.assertRaises(RuntimeError):
+            make_backend(StubCfg(), llm=None)
+
+    def test_memory_with_neural_backend_persists_and_reuses_embeddings(self):
+        """Stub a persistent backend; verify Memory writes its embedding to
+        the BLOB column and a second Memory instance loads from cache (no
+        re-embed)."""
+        from brain.memory import Memory, EPISODIC
+        from brain.embeddings import EmbeddingBackend, _pack_floats, _unpack_floats
+
+        # A toy persistent backend whose 'embedding' is a fixed-length vector
+        # derived deterministically from the text (so re-encode is detectable).
+        class _ToyBackend(EmbeddingBackend):
+            name = "toy"
+            persistent = True
+            def __init__(self):
+                self._vecs = {}
+                self._fitted = False
+                self.encode_calls = 0
+            def _embed(self, text):
+                # 4D vector: lengths of first 4 word tokens
+                toks = text.split()[:4]
+                return [float(len(t)) for t in toks] + [0.0] * (4 - len(toks[:4]))
+            def fit(self, docs):
+                docs = list(docs)
+                for did, text in docs:
+                    if did in self._vecs:
+                        continue
+                    self._vecs[did] = self._embed(text)
+                    self.encode_calls += 1
+                self._fitted = True
+            def topk(self, q, k, eligible=None):
+                if not self._fitted:
+                    return []
+                qv = self._embed(q)
+                import math
+                qn = math.sqrt(sum(x*x for x in qv))
+                if qn == 0: return []
+                out = []
+                for did, v in self._vecs.items():
+                    if eligible is not None and did not in eligible:
+                        continue
+                    dn = math.sqrt(sum(x*x for x in v))
+                    if dn == 0: continue
+                    dot = sum(a*b for a,b in zip(qv, v))
+                    out.append((did, dot/(qn*dn)))
+                out.sort(key=lambda x: x[1], reverse=True)
+                return out[:k]
+            def encode_one(self, text):
+                return _pack_floats(self._embed(text))
+            def from_bytes(self, blob):
+                return _unpack_floats(blob)
+            def remember(self, did, vec):
+                self._vecs[did] = vec
+
+        tmp = Path(tempfile.mkdtemp()) / "p.sqlite"
+        m1 = Memory(tmp, backend=_ToyBackend())
+        m1.store("t", "a", "alpha beta gamma delta", 0.6, mem_type=EPISODIC)
+        m1.store("t", "a", "epsilon zeta eta theta", 0.6, mem_type=EPISODIC)
+        # First retrieve forces fit() + write-back of BLOBs
+        hits = m1.retrieve_semantic("alpha beta", k=2, types=[EPISODIC])
+        self.assertTrue(hits)
+        bk1 = m1.backend
+        first_pass_calls = bk1.encode_calls
+        self.assertGreater(first_pass_calls, 0)
+        m1.close()
+
+        # Open the db with a FRESH backend; cached BLOBs should populate it
+        # without re-encoding the existing rows.
+        m2 = Memory(tmp, backend=_ToyBackend())
+        m2.retrieve_semantic("alpha", k=2, types=[EPISODIC])
+        bk2 = m2.backend
+        # Only rows missing a blob would trigger encode — there are none here.
+        self.assertEqual(bk2.encode_calls, 0)
+        m2.close()
 
 
 class PredictiveCodingTests(unittest.TestCase):

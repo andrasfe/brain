@@ -31,7 +31,7 @@ import time
 from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence
 
-from .tfidf import TfidfIndex
+from .embeddings import EmbeddingBackend, TfidfBackend
 
 _WORD = re.compile(r"[a-z0-9]+")
 
@@ -45,20 +45,26 @@ _VALID_TYPES = {EPISODIC, SEMANTIC, PROSPECTIVE, AFFECT, SOURCE}
 
 
 class Memory:
-    """SQLite-backed typed memory. Auto-migrates older single-bucket schemas."""
+    """SQLite-backed typed memory. Auto-migrates older single-bucket schemas.
 
-    def __init__(self, db_path: Path, tfidf_refit_every: int = 50,
-                 tfidf_vocab_cap: int = 4000):
+    Semantic retrieval is delegated to a pluggable `EmbeddingBackend` (see
+    `brain/embeddings.py`). Default is TF-IDF — no deps, no API calls. The
+    OpenRouter and sentence-transformers backends persist per-row embeddings
+    in the `embedding` BLOB column so they're not recomputed across runs.
+    """
+
+    def __init__(self, db_path: Path, refit_every: int = 50,
+                 backend: Optional[EmbeddingBackend] = None):
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(db_path))
         self.conn.row_factory = sqlite3.Row
         self._init_schema()
         self._migrate_schema()
-        # Lazy TF-IDF index — rebuilt on first semantic query and after every
-        # `tfidf_refit_every` inserts.
-        self._tfidf = TfidfIndex(vocab_cap=tfidf_vocab_cap)
+        # Default backend = TF-IDF. The orchestrator typically passes in a
+        # configured backend at construction (see `make_backend(cfg, llm)`).
+        self.backend: EmbeddingBackend = backend or TfidfBackend()
         self._inserts_since_fit = 0
-        self._refit_every = tfidf_refit_every
+        self._refit_every = refit_every
 
     # ── schema ──────────────────────────────────────────────────────────────
     def _init_schema(self) -> None:
@@ -98,9 +104,9 @@ class Memory:
         self.conn.commit()
 
     def _migrate_schema(self) -> None:
-        """Older brains created `episodes` without mem_type/affect_json/tags.
-        ALTER on-startup so prior data stays usable, then build any indexes
-        that reference newly-added columns."""
+        """Older brains created `episodes` without mem_type/affect_json/tags/
+        embedding. ALTER on-startup so prior data stays usable, then build any
+        indexes that reference newly-added columns."""
         cols = {row["name"] for row in
                 self.conn.execute("PRAGMA table_info(episodes)").fetchall()}
         with self.conn:
@@ -111,6 +117,9 @@ class Memory:
                 self.conn.execute("ALTER TABLE episodes ADD COLUMN affect_json TEXT")
             if "tags" not in cols:
                 self.conn.execute("ALTER TABLE episodes ADD COLUMN tags TEXT")
+            if "embedding" not in cols:
+                # BLOB cache for neural-embedding backends; NULL for TF-IDF
+                self.conn.execute("ALTER TABLE episodes ADD COLUMN embedding BLOB")
             # Index referencing mem_type — safe to create now
             self.conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_episodes_type ON episodes(mem_type)")
@@ -133,7 +142,14 @@ class Memory:
         self.conn.commit()
         self._inserts_since_fit += 1
         if self._inserts_since_fit >= self._refit_every:
-            self._tfidf.fitted = False  # mark stale; refit on next semantic query
+            # Mark the active backend stale. For TF-IDF this triggers a full
+            # rebuild; for neural backends, fit() embeds only missing rows.
+            if isinstance(self.backend, TfidfBackend):
+                self.backend.mark_stale()
+            else:
+                # Neural backends maintain their own cache; fit() will pick
+                # the new row up on the next semantic query. Nothing to do.
+                pass
         return int(cur.lastrowid)
 
     # ── keyword retrieval (kept for cheap default) ──────────────────────────
@@ -153,27 +169,38 @@ class Memory:
         scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
         return [self._row_to_dict(r) for _, _, r in scored[:k]]
 
-    # ── semantic retrieval via TF-IDF ───────────────────────────────────────
+    # ── semantic retrieval (pluggable backend) ──────────────────────────────
     def retrieve_semantic(self, query: str, k: int = 5,
                            types: Optional[Sequence[str]] = None,
                            min_score: float = 0.05) -> list[dict[str, Any]]:
-        """Cosine over TF-IDF vectors. Builds/refreshes the index lazily.
+        """Cosine over the active embedding backend. Persistable backends
+        (OpenRouter, sentence-transformers) cache per-row vectors in the
+        `embedding` BLOB column to avoid recomputing across runs.
+
         `types` restricts candidates; `min_score` filters weak matches."""
         rows = self._candidates(types)
         if not rows:
             return []
-        if not self._tfidf.fitted:
-            self._tfidf.fit(
-                (int(r["id"]), (r["content"] + " " + r["task"])) for r in rows
-            )
-            self._inserts_since_fit = 0
-        # If types restricted and index built over full corpus, we still need
-        # to filter results — pass `eligible` ids.
+
+        # Load any cached embeddings into the neural backend's in-memory map
+        # before fit() — so it doesn't waste API calls on rows we've seen.
+        if self.backend.persistent:
+            self._preload_cached_embeddings(rows)
+
+        # Fit / refresh the backend's view of the eligible corpus.
+        self.backend.fit(
+            (int(r["id"]), (r["content"] + " " + r["task"])) for r in rows
+        )
+        self._inserts_since_fit = 0
+
+        # Persist any newly-computed embeddings back to the row cache.
+        if self.backend.persistent:
+            self._persist_new_embeddings(rows)
+
         eligible_ids = {int(r["id"]) for r in rows}
-        ranked = self._tfidf.topk(query, k=k * 2, eligible=eligible_ids)
+        ranked = self.backend.topk(query, k=k * 2, eligible=eligible_ids)
         if not ranked:
             return []
-        # Materialize the rows by id
         ids = [doc_id for doc_id, _ in ranked]
         placeholders = ",".join("?" * len(ids))
         rows_by_id = {
@@ -194,6 +221,44 @@ class Memory:
             if len(results) >= k:
                 break
         return results
+
+    # ── embedding cache I/O for persistable backends ────────────────────────
+    def _preload_cached_embeddings(self, rows) -> None:
+        """If a neural backend, populate its in-memory map from the row's
+        `embedding` BLOB column so we skip the API call."""
+        bk = self.backend
+        if not getattr(bk, "remember", None):
+            return
+        for r in rows:
+            blob = r["embedding"] if "embedding" in r.keys() else None
+            if not blob:
+                continue
+            vec = bk.from_bytes(blob)
+            if vec:
+                bk.remember(int(r["id"]), vec)
+
+    def _persist_new_embeddings(self, rows) -> None:
+        """Write back any embeddings computed by the backend on this fit
+        that weren't already in the row's `embedding` BLOB column."""
+        bk = self.backend
+        vecs = getattr(bk, "_vecs", None)
+        if not vecs:
+            return
+        from .embeddings import _pack_floats
+        to_write: list[tuple[bytes, int]] = []
+        for r in rows:
+            rid = int(r["id"])
+            if rid not in vecs:
+                continue
+            had_blob = "embedding" in r.keys() and r["embedding"]
+            if had_blob:
+                continue
+            to_write.append((_pack_floats(vecs[rid]), rid))
+        if not to_write:
+            return
+        self.conn.executemany(
+            "UPDATE episodes SET embedding=? WHERE id=?", to_write)
+        self.conn.commit()
 
     def _candidates(self, types: Optional[Sequence[str]]) -> list[sqlite3.Row]:
         if types:

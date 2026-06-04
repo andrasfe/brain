@@ -33,6 +33,7 @@ from .affect import AffectState, Traits
 from .config import Config
 from . import consolidator as _consolidator
 from .effectors import Effectors
+from .embeddings import make_backend
 from .llm import LLM
 from .memory import EPISODIC, Memory, SEMANTIC
 from .persona import Persona, load_persona
@@ -70,7 +71,10 @@ class Brain:
         self.cfg = cfg
         self.log = log or (lambda _m: None)
         self.llm = LLM(cfg)
-        self.memory = Memory(cfg.db_path)
+        # Embedding backend (pluggable). Defaults to TF-IDF; switches to
+        # sentence-transformers / OpenRouter if configured.
+        backend = make_backend(cfg, llm=self.llm)
+        self.memory = Memory(cfg.db_path, backend=backend)
         # The skill store shares the memory db on purpose: skills are a kind
         # of procedural memory and persist across runs alongside episodes.
         self.skills = SkillStore(cfg.db_path)

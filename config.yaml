@@ -30,6 +30,21 @@ memory:
   db_path: "~/brain/memory.sqlite3"
   retrieve_k: 5           # episodes pulled into the workspace per retrieval
 
+  # Embedding backend for retrieve_semantic.
+  #   "tfidf"               — pure Python, no deps (default fallback)
+  #   "openrouter"          — HTTP /embeddings via openrouter; needs embedding_model
+  #   "sentence_transformers" — local, free; needs `pip install sentence-transformers`
+  #   "auto"                — try sentence_transformers → openrouter → tfidf
+  embedding_backend: "auto"
+  # Used by neural backends. For openrouter, e.g. "openai/text-embedding-3-small".
+  # For sentence_transformers, e.g. "sentence-transformers/all-MiniLM-L6-v2".
+  embedding_model: "openai/text-embedding-3-small"
+
+  # End-of-task consolidation knobs (see brain/consolidator.py).
+  consolidate_window: 40
+  consolidate_min_cluster: 3
+  consolidate_max_facts: 2
+
 effectors:
   filesystem:
     enabled: true
