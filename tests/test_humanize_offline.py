@@ -665,5 +665,221 @@ class StreamOfThoughtTests(unittest.TestCase):
         self.assertIn("default_mode", second_prompt)
 
 
+class SleepAgentsTests(unittest.TestCase):
+    """Each sleep agent in isolation against an in-memory DB."""
+
+    def _fresh_memory(self):
+        from brain.memory import Memory
+        tmp = Path(tempfile.mkdtemp()) / "m.sqlite"
+        return Memory(tmp)
+
+    def test_forgetter_prunes_low_salience_old_episodes(self):
+        from brain.memory import EPISODIC
+        from brain.sleep import Forgetter
+        m = self._fresh_memory()
+        # Insert ancient low-salience rows (the forgetter should delete them)
+        # and recent high-salience rows (must survive). We backdate the
+        # 'ancient' rows by editing ts directly.
+        import time as _t
+        old = _t.time() - 24 * 3600  # 24h ago
+        for _ in range(20):
+            rid = m.store("t", "a", "old fluff", 0.1, mem_type=EPISODIC)
+            m.conn.execute("UPDATE episodes SET ts=? WHERE id=?", (old, rid))
+        for _ in range(10):
+            m.store("t", "a", "very recent and important", 0.9, mem_type=EPISODIC)
+        # Recent old rows that are nevertheless within recency_safety must survive
+        m.conn.commit()
+        before = m.count(EPISODIC)
+        stats = Forgetter(min_age_seconds=3600,
+                          recency_safety=5,
+                          salience_threshold=0.3).run(m)
+        after = m.count(EPISODIC)
+        self.assertGreater(stats["pruned"], 0)
+        self.assertLess(after, before)
+        m.close()
+
+    def test_skill_pruner_decays_and_deletes(self):
+        from brain.skills import SkillStore
+        from brain.sleep import SkillPruner
+        tmp = Path(tempfile.mkdtemp()) / "s.sqlite"
+        s = SkillStore(tmp)
+        # Make several skills successful so they're stored
+        s.consolidate("sig", "shell", {"command": "ls"}, ok=True)
+        s.consolidate("sig", "shell", {"command": "ls"}, ok=True)
+        s.consolidate("sig", "shell", {"command": "rm"}, ok=False)
+        # Force last_used to ancient
+        s.conn.execute("UPDATE skills SET last_used=0")
+        s.conn.commit()
+        before_count = s.conn.execute("SELECT COUNT(*) AS n FROM skills").fetchone()["n"]
+        stats = SkillPruner(unused_age_seconds=10,
+                            delete_below_conf=0.4).run(s)
+        after_count = s.conn.execute("SELECT COUNT(*) AS n FROM skills").fetchone()["n"]
+        self.assertGreater(stats["decayed"], 0)
+        # The failed-shell skill had conf 0.30 → after one decay round it
+        # drops below 0.4 and gets deleted
+        self.assertLess(after_count, before_count)
+        s.close()
+
+    def test_mood_regulator_recovers_fatigue_and_drifts_valence(self):
+        from brain.affect import AffectState
+        from brain.sleep import MoodRegulator
+        a = AffectState()
+        a.fatigue = 0.9
+        a.valence = -0.6
+        a.stress = 0.7
+        MoodRegulator(recovery_steps=12, fatigue_recovery_per_step=0.05).run(a)
+        self.assertLess(a.fatigue, 0.5)
+        # valence should regress toward 0 (i.e. less negative)
+        self.assertGreater(a.valence, -0.6)
+        self.assertLess(a.stress, 0.7)
+
+    def test_scheduler_fires_time_triggers(self):
+        m = self._fresh_memory()
+        m.prospective_register(
+            content="call back in a moment",
+            trigger_kind="time", trigger_pattern="0",
+            salience=0.8, fires_after_ts=0,
+        )
+        from brain.sleep import Scheduler
+        fired = Scheduler().fire_due(m)
+        self.assertEqual(len(fired), 1)
+        self.assertIn("call back", fired[0]["content"])
+        # Second call: already marked done → no fire
+        fired2 = Scheduler().fire_due(m)
+        self.assertEqual(fired2, [])
+        m.close()
+
+    def test_dreamer_writes_low_confidence_semantic(self):
+        from unittest.mock import MagicMock
+        from brain.memory import EPISODIC, SEMANTIC
+        from brain.sleep import Dreamer
+        m = self._fresh_memory()
+        # Seed distant memories so the sampler can find unrelated pairs
+        for txt in [
+            "wrote primes.py and tested it carefully",
+            "the cat learned to open the kitchen door",
+            "rainy commute, train delayed twenty minutes",
+            "argued about jazz with a friend over dinner",
+            "ran 10k along the canal at dawn",
+        ]:
+            m.store("t", "a", txt, 0.6, mem_type=EPISODIC)
+        llm = MagicMock()
+        llm.chat.return_value = "What if the cat is the only true critic of jazz?"
+        stats = Dreamer(dreams_per_bout=2, max_pair_cosine=0.95,
+                        seed=1).run(m, llm, model="fake",
+                                     log=lambda _m: None)
+        self.assertGreaterEqual(stats["written"], 1)
+        # Dreams are tagged
+        sem = m.recent(20, mem_type=SEMANTIC)
+        any_dream = any("dream" in (r.get("tags") or "") for r in sem)
+        self.assertTrue(any_dream)
+        m.close()
+
+
+class DaemonStateMachineTests(unittest.TestCase):
+    """The state transitions don't require live LLM calls — only Brain
+    construction. We stub LLM and run the daemon with max_ticks."""
+
+    def test_wake_to_drowsy_to_nrem(self):
+        from brain.config import Config
+        from brain.orchestrator import Brain
+        from brain.daemon import BrainDaemon, WAKE, DROWSY, NREM
+        tmp = Path(tempfile.mkdtemp())
+        cfg = Config(
+            raw={"persona_path": str(REPO / "personas" / "alex.yaml"),
+                  "scenario": "boring_afternoon", "humanize": True},
+            api_key="fake", base_url="http://fake",
+            models={"reflex": "fake", "executive": "fake"},
+            timeout_seconds=10, max_retries=0,
+            sandbox_dir=tmp, db_path=tmp / "mem.sqlite",
+            loop={"max_cycles": 1, "attention_decay": 0.8},
+            memory={"db_path": str(tmp / "mem.sqlite"), "retrieve_k": 3,
+                     "embedding_backend": "tfidf"},
+            effectors={"filesystem": {"enabled": False},
+                        "shell": {"enabled": False}, "web": {"enabled": False}},
+            regions={k: "reflex" for k in
+                      ["sensory_cortex","amygdala","basal_ganglia","hippocampus",
+                       "prefrontal","broca","interoception","default_mode",
+                       "locus_coeruleus","vta"]},
+        )
+
+        with patch("brain.orchestrator.LLM") as MockLLM:
+            llm = MagicMock()
+            llm.chat_json.return_value = {}
+            llm.chat.return_value = ""
+            llm.close = MagicMock()
+            MockLLM.return_value = llm
+
+            brain = Brain(cfg, confirm=lambda _m: True, log=lambda _m: None,
+                          humanize=True, seed=0)
+            d = BrainDaemon(
+                cfg, brain,
+                tick_seconds=0.0,
+                idle_rate=0.0,
+                drowsy_fatigue=0.30,
+                sleep_fatigue=0.55,
+                wake_fatigue=0.20,
+                nrem_bout_ticks=2, rem_bout_ticks=2,
+                log=lambda _m: None,
+                seed=0,
+            )
+            # Start with high fatigue → expect drowsy → nrem on next tick
+            d.affect.fatigue = 0.4
+            self.assertEqual(d.state, WAKE)
+            d.tick()
+            self.assertIn(d.state, (DROWSY, NREM))
+            # Bump fatigue past sleep threshold; next tick goes to NREM
+            d.affect.fatigue = 0.7
+            d.tick()
+            self.assertIn(d.state, (NREM, "rem"))
+            brain.close()
+
+    def test_external_input_wakes_brain(self):
+        from brain.config import Config
+        from brain.orchestrator import Brain
+        from brain.daemon import BrainDaemon, NREM, WAKE
+        tmp = Path(tempfile.mkdtemp())
+        cfg = Config(
+            raw={"persona_path": str(REPO / "personas" / "alex.yaml"),
+                  "scenario": "neutral", "humanize": True},
+            api_key="fake", base_url="http://fake",
+            models={"reflex": "fake", "executive": "fake"},
+            timeout_seconds=10, max_retries=0,
+            sandbox_dir=tmp, db_path=tmp / "mem.sqlite",
+            loop={"max_cycles": 1, "attention_decay": 0.8},
+            memory={"db_path": str(tmp / "mem.sqlite"), "retrieve_k": 3,
+                     "embedding_backend": "tfidf"},
+            effectors={"filesystem": {"enabled": False},
+                        "shell": {"enabled": False}, "web": {"enabled": False}},
+            regions={k: "reflex" for k in
+                      ["sensory_cortex","amygdala","basal_ganglia","hippocampus",
+                       "prefrontal","broca","interoception","default_mode",
+                       "locus_coeruleus","vta"]},
+        )
+        with patch("brain.orchestrator.LLM") as MockLLM:
+            llm = MagicMock()
+            llm.chat_json.return_value = {
+                "goal": "x", "entities": [], "constraints": [],
+                "success_criterion": "done",
+                "content": "OK", "kind": "finish",
+                "args": {"answer": "ok"}, "confidence": 0.9,
+                "decision": "go", "reason": "fine",
+            }
+            llm.chat.return_value = "final"
+            llm.close = MagicMock()
+            MockLLM.return_value = llm
+            brain = Brain(cfg, confirm=lambda _m: True, log=lambda _m: None,
+                          humanize=True, seed=0)
+            d = BrainDaemon(cfg, brain, tick_seconds=0.0, idle_rate=0.0,
+                             log=lambda _m: None, seed=0)
+            # Force NREM
+            d.state = NREM
+            d._sleep_bouts_remaining = 5
+            d.enqueue("a brand new task")
+            d.tick()
+            self.assertEqual(d.state, WAKE)
+            brain.close()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

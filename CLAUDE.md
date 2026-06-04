@@ -60,6 +60,11 @@ python3 -m eval.stream_demo                      # show chain unfolding per scen
 python3 -m brain.consolidator --n 200 --max-facts 10
 python3 -m brain.consolidator --dry-run          # cluster + tag, no LLM
 
+# always-on daemon — WAKE / DROWSY / NREM / REM state machine + sleep agents
+python3 -m brain.daemon
+python3 -m brain.daemon --tick-seconds 0.5 --idle-rate 0.05
+python3 -m brain.daemon --initial-task "plan dinner" --max-ticks 200
+
 # offline tests (no network, no API key)
 python3 -m unittest tests.test_humanize_offline -v
 
@@ -157,6 +162,44 @@ either recovers ("Forget the cat; …") or drifts.
 
 - **`brain/tfidf.py`** — `TfidfIndex` with cosine `topk` and an `eligible`
   filter so typed retrieval doesn't pay for full-corpus scoring.
+
+- **`brain/embeddings.py`** — pluggable embedding backends behind one
+  interface: `TfidfBackend` (default, no deps), `OpenRouterBackend` (HTTP
+  `/embeddings`), `SentenceTfBackend` (optional local). Persistent backends
+  cache per-row vectors in the `episodes.embedding` BLOB column (lazy
+  encode-on-read, write-back). `make_backend(cfg, llm)` is the factory;
+  `"auto"` tries local → openrouter → tfidf. Explicit names fail loud on
+  misconfiguration.
+
+- **`brain/daemon.py`** — `BrainDaemon`: long-lived event loop with the
+  WAKE / DROWSY / NREM / REM state machine. Transitions driven by
+  `AffectState.fatigue` and World hour. WAKE processes input via the
+  existing `Brain.run` stream; idle WAKE optionally emits rate-limited
+  spontaneous thoughts (gated by curiosity − stress). NREM dispatches the
+  forgetter / skill_pruner / mood_regulator / consolidator agents per bout.
+  REM dispatches the dreamer. Sleep cycles alternate NREM/REM with REM
+  share growing late, mirroring real biology. CLI:
+  `python -m brain.daemon`; stdin lines enqueue tasks while the loop runs;
+  Ctrl-C exits cleanly. Time-triggered prospective items rouse the brain
+  from sleep via the scheduler agent.
+
+- **`brain/sleep/`** — sleep-only agents, each owning ONE job:
+  - `dreamer.py` (REM): samples DISTANT memory pairs (low TF-IDF cosine);
+    LLM produces one connecting hypothesis / metaphor / "what if"; written
+    back as low-confidence `mem_type=semantic` with `tags=['dream']`.
+    Selection pressure (forgetter + future corroboration) decides which
+    dreams persist.
+  - `forgetter.py` (NREM): deletes low-salience old episodic rows. Never
+    touches `prior:*` persona facts, semantic/affect/source rows, or the
+    most recent N episodic rows (recency safety net).
+  - `skill_pruner.py` (NREM): decays SkillStore confidence for skills not
+    used in T time; deletes very-low-confidence skills.
+  - `mood_regulator.py` (NREM): aggressive AffectState drift toward
+    baseline; fatigue actively recovers; hunger does NOT (sleep doesn't
+    feed you).
+  - `scheduler.py` (always-on): fires `kind='time'` prospective triggers
+    when their absolute time has arrived. Marks them done so they don't
+    re-fire. Time triggers ROUSE the brain from sleep.
 
 - **`brain/consolidator.py`** — the offline "sleep" pass. Greedy single-link
   clustering of recent episodic rows by TF-IDF cosine, then an LLM call per
@@ -299,6 +342,16 @@ either recovers ("Forget the cat; …") or drifts.
   boring_afternoon | social_evening | sick_day` (see `brain/world.py`).
 
 CLI overrides: `--persona`, `--scenario`, `--vanilla`, `--seed`.
+
+### Long-lived daemon
+
+For an always-on brain instead of a per-task run, use
+`python -m brain.daemon`. Stdin is polled non-blockingly so you can type
+tasks while it ticks; the state machine handles sleep/wake transitions
+automatically. The CLI flags `--tick-seconds` (wall-clock pace),
+`--idle-rate` (spontaneous-thought probability), and `--max-ticks` (bounded
+runs / tests) tune the loop. The single-task `python run.py "…"` entry
+still works — `Brain.run(task)` is what the daemon calls under the hood.
 
 ## Persona files (`personas/*.yaml`)
 
