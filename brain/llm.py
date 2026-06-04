@@ -53,12 +53,22 @@ class LLM:
                 r = self._client.post("/chat/completions", json=payload)
                 r.raise_for_status()
                 data = r.json()
-                return data["choices"][0]["message"]["content"] or ""
+                msg = data["choices"][0]["message"]
+                # Some reasoning models (Nemotron, DeepSeek-R1, …) put their
+                # full output in `reasoning_content` and leave `content`
+                # empty until the chain-of-thought finishes. We accept either:
+                # prefer `content`, fall back to `reasoning_content`.
+                # `chat_json` then extracts the JSON block from whichever
+                # field had the text.
+                content = msg.get("content") or ""
+                if not content:
+                    content = msg.get("reasoning_content") or ""
+                return content
             except Exception as e:  # noqa: BLE001 — retry on any transport/HTTP error
                 last_err = e
                 if attempt < self.cfg.max_retries:
                     time.sleep(1.5 * (attempt + 1))
-        raise RuntimeError(f"OpenRouter call failed after retries: {last_err}")
+        raise RuntimeError(f"LLM call failed after retries: {last_err}")
 
     def chat_json(
         self,
