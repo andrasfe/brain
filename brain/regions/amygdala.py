@@ -20,13 +20,19 @@ class Amygdala(Region):
     )
 
     def step(self, ws: Workspace) -> Broadcast:
+        a = ws.affect
         out = self._chat_json(
             ws.render_context() + "\n\n"
+            f"You currently feel: {a.mood_label} (val={a.valence:+.2f}, "
+            f"arousal={a.arousal:.2f}, stress={a.stress:.2f}). Reactions to threat "
+            f"are amplified by neuroticism (yours={a.traits.neuroticism:.2f}).\n"
             'Assess the current state. Return JSON: '
-            '{"valence": "positive|neutral|negative", "urgency": 0.0-1.0, '
+            '{"valence_shift": -0.3..0.3 (how this state moves your mood), '
+            '"urgency": 0.0-1.0, '
+            '"stress_shift": -0.2..0.3, '
             '"interrupt": null or "short reason to halt/redirect", '
             '"note": "one-line salience assessment"}',
-            temperature=0.4,
+            temperature=0.4 + 0.3 * a.arousal,
         )
         urgency = float(out.get("urgency", 0.3) or 0.3)
         interrupt = out.get("interrupt")
@@ -34,9 +40,20 @@ class Amygdala(Region):
             ws.interrupt = str(interrupt)
         else:
             ws.interrupt = None
+
+        # Push affect — the amygdala is the dominant valence/stress writer
+        deltas = {
+            "valence": float(out.get("valence_shift") or 0.0),
+            "stress": float(out.get("stress_shift") or 0.0),
+        }
+        # Urgent appraisals always nudge arousal up
+        if urgency > 0.6:
+            deltas["arousal"] = +0.05 * (urgency - 0.5)
+        ws.affect.update(self.name, ws.cycle, deltas, smoothing=0.7)
+
         return ws.post(Broadcast(
             source=self.name, kind="salience",
-            content=out.get("note", f"valence={out.get('valence')} urgency={urgency:.2f}"),
+            content=out.get("note", f"urgency={urgency:.2f}"),
             salience=min(1.0, 0.4 + urgency),  # urgent things grab the spotlight
             data=out,
         ))

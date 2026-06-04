@@ -26,7 +26,25 @@ class Hippocampus(Region):
     def step(self, ws: Workspace) -> Broadcast | None:
         percept = ws.latest(kind="percept")
         query = (percept.content if percept else ws.task)
+        # Mood-congruent recall: when mood is negative, weight the query toward
+        # negatively-toned content; when positive, the opposite. Cheap hack:
+        # append mood keywords to the retrieval query so the bag-of-words
+        # ranker pulls congruent priors.
+        af = ws.affect
+        if af.valence < -0.25:
+            query += " worry stress regret tired failed lost"
+        elif af.valence > 0.25:
+            query += " good happy proud success warm calm"
+        # Always pull in identity / recent priors with a small extra weight
+        # via a second retrieval keyed on 'prior'.
         episodes = self.memory.retrieve(query, k=self.k)
+        priors = self.memory.retrieve("prior identity recent", k=max(2, self.k // 2))
+        # de-dupe by id while keeping order: episodes first, then priors
+        seen = {e["id"] for e in episodes}
+        for p in priors:
+            if p["id"] not in seen:
+                episodes.append(p)
+                seen.add(p["id"])
         if not episodes:
             return None
         recalled = "; ".join(f"[{e['kind']}] {e['content'][:120]}" for e in episodes)

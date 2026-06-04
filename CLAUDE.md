@@ -4,17 +4,31 @@ Guidance for Claude (and humans) working in this repository.
 
 ## What This Is
 
-`brain` is a multi-agent model of cognition built on **Global Workspace Theory (GWT)**.
-Each brain region is implemented as an LLM-backed agent. The regions process a
-shared blackboard (the "global workspace"); the most salient contribution wins an
-attention "spotlight" each cognitive cycle, and the system acts until the goal is
-met. It runs as an **autonomous task agent**: given a goal, the regions plan and
-act (filesystem, shell, web) until the prefrontal cortex declares completion.
+`brain` is a **humanized cognitive agent** built on Global Workspace Theory (GWT).
+Each brain region is an LLM-backed agent posting to a shared blackboard. On top
+of that GWT skeleton sits a humanization layer designed to make the brain's
+outputs **diverge from the underlying raw LLM**:
 
-The design is a deliberate cousin of the **Modular Agentic Planner (MAP)** paper
-(Webb, Mondal & Momennejad, arXiv:2310.00194), which argues that decomposing
-planning across specialized LLM modules beats a single monolithic LLM call. See
-"Relationship to MAP" and TODO.md for where we match the paper and where we don't.
+1. A persistent **AffectState** (PAD valence/arousal/dominance + homeostatic
+   drives + Big-Five-lite traits) that lives across cycles and colors every
+   region's prompt.
+2. A **loadable persona** (YAML biographical facts → implicit traits + seeded
+   hippocampus priors).
+3. An ambient **World harness** (time-of-day, weather, notifications, social
+   pings, deadline pressure) feeding sensory broadcasts each cycle.
+4. New neuromodulator regions: **interoception** (body→affect), **default
+   mode network** (mind-wandering & intrusions), **locus coeruleus** (arousal
+   gain), **VTA** (reward signal).
+5. An **autoregressive stream-of-thought prefrontal**: instead of one atomic
+   action per cycle, the prefrontal produces a chain of `ThoughtUnit`s,
+   token-by-token style. Other regions tick *between units* and can append
+   their own units — that's how a DMN tangent or amygdala alarm hijacks the
+   chain mid-thought.
+
+GWT discipline is preserved: regions never call each other; they read/write the
+shared `Workspace`. The design also stays a cousin of the **Modular Agentic
+Planner (MAP)** paper (Webb, Mondal & Momennejad, arXiv:2310.00194); see
+TODO.md for where we match and don't.
 
 ## Connectivity
 
@@ -26,15 +40,26 @@ model). Nothing secret is stored in this repo.
 ## Commands
 
 ```bash
-# one-off task (interactive shell confirmation for any shell command)
+# one-off task (humanized by default — persona+scenario from config.yaml)
 python3 run.py "your task here"
 python3 run.py --yes   "task"     # auto-approve sandboxed shell commands
 python3 run.py --quiet "task"     # hide the cognitive trace
 
-# run the MAP-paper comparison eval (brain vs qwen-alone)
-python3 -m eval.run_eval --n 10 --disks 3        # writes eval/results/
+# humanization overrides
+python3 run.py --persona personas/sam.yaml --scenario deadline_night "task"
+python3 run.py --vanilla "task"   # disable humanization (no affect/world/DMN)
+python3 run.py --seed 7 "task"    # deterministic World ticker + DMN
 
-# macOS double-click launchers (used when driving from the desktop)
+# evals
+python3 -m eval.run_eval --n 10 --disks 3        # MAP comparison (brain vs raw)
+python3 -m eval.humanize --n 4                   # divergence battery vs raw
+python3 -m eval.quick_smoke                      # minimal raw-vs-humanized smoke
+python3 -m eval.stream_demo                      # show chain unfolding per scenario
+
+# offline tests (no network, no API key)
+python3 -m unittest tests.test_humanize_offline -v
+
+# macOS double-click launchers
 run_demo.command       # runs a demo task
 run_eval.command       # runs the comparison eval
 ```
@@ -44,14 +69,32 @@ Python 3.9+.
 
 ## Architecture
 
-### Core pipeline (reactive cognitive cycle)
+### Core pipeline (autoregressive stream of thought)
 
 ```
-perceive → [ recall → appraise → spotlight → plan → gate → act → consolidate ]* → speak
+perceive (sensory cortex, once)
+loop until thought-unit.kind == "finish" or max_cycles reached:
+  world.tick           → ambient stimuli (rate-limited)
+  interoception        → body → affect
+  hippocampus.recall   → mood-congruent episodes (rate-limited)
+  amygdala             → valence/stress writes, maybe interrupt
+  locus_coeruleus      → arousal gain
+  default_mode         → maybe append a tangent ThoughtUnit (hijack)
+  spotlight            → broadcast most salient item
+  prefrontal           → produce ONE ThoughtUnit conditioned on
+                         (full chain so far, AffectState, workspace)
+  if unit.kind == "action":
+    basal_ganglia      → go / no_go (mood-loosened or -tightened)
+    effectors.execute  → motor result appended to chain
+    vta                → reward prediction error → AffectState
+  affect.decay_toward_baseline
+speak (broca, once)    → final answer voiced by mood
 ```
 
-One `Brain.run(task)` per task. The loop repeats until the prefrontal cortex
-chooses `finish` or `max_cycles` is reached, then Broca synthesizes the answer.
+`max_cycles` is reinterpreted as the cap on chain length (analogue of max
+generated tokens). With this loop, DMN tangents and amygdala intrusions show
+up *inside* the chain — the next prefrontal step sees them in its context and
+either recovers ("Forget the cat; …") or drifts.
 
 ### Modules
 
@@ -61,10 +104,35 @@ chooses `finish` or `max_cycles` is reached, then Broca synthesizes the answer.
 
 - **`brain/workspace.py`** — the **Global Workspace** (blackboard). `Broadcast`
   is a single contribution (source region, kind, content, salience, structured
-  `data`). `Workspace` holds the task, all broadcasts, the action `history`, and
-  the attention mechanism. `tick_attention()` decays existing salience and
-  promotes the single most-salient un-broadcast item into the "conscious
-  spotlight". `render_context()` produces the compact view fed to region prompts.
+  `data`). `Workspace` holds the task, all broadcasts, the action `history`,
+  the **`thought_chain`** (list of `ThoughtUnit`s — the autoregressive stream),
+  and the **`affect`** field (persistent AffectState). `tick_attention()`
+  decays existing salience and promotes the most-salient un-broadcast item,
+  but the decay rate and the chance a runner-up DMN/world item wins are both
+  modulated by current arousal/distractibility. `render_context()` produces
+  the compact view fed to region prompts; it now includes both the
+  AffectState line and the recent thought chain.
+
+- **`brain/affect.py`** — `AffectState` (PAD + drives + reward tone +
+  `Traits`) and `Traits` (Big-Five-lite anchors). EMA updates so affect
+  *persists* across cycles; `decay_toward_baseline()` simulates homeostatic
+  drift (hunger++/fatigue++/boredom++ over time, mood regresses to mean).
+  Derived properties: `mood_label`, `attention_width` (inverted-U on arousal),
+  `distractibility` (boredom + fatigue + low arousal, damped by
+  conscientiousness).
+
+- **`brain/persona.py`** — loads a YAML persona; derives `Traits` from
+  disposition tags (`introvert`, `perfectionist`, `open to weird ideas`, …);
+  exposes `memory_seeds()` (priors inserted into the hippocampus at brain
+  init) and `initial_affect_deltas()` (recent events tint starting mood).
+  Explicit `trait_overrides` always win.
+
+- **`brain/world.py`** — the ambient environment ticker. Scenarios
+  (`calm_morning`, `deadline_night`, `boring_afternoon`, `social_evening`,
+  `sick_day`, `neutral`) seed time-of-day, weather, baseline affect, and an
+  event-rate. Each `tick()` returns `Stimulus`es (body lines + stochastic
+  notifications, social pings, deadline pressure) which the orchestrator
+  posts to the workspace as `source="world"` broadcasts.
 
 - **`brain/llm.py`** — thin OpenRouter client (`LLM`). `chat()` and `chat_json()`
   with retry/backoff; `chat_json` is tolerant of code fences / surrounding prose
@@ -82,17 +150,38 @@ chooses `finish` or `max_cycles` is reached, then Broca synthesizes the answer.
 - **`brain/regions/`** — one agent per region:
   - **`sensory_cortex.py`** — perception. Runs once; parses the raw task into a
     structured percept (goal, entities, constraints, success criterion).
-  - **`hippocampus.py`** — episodic memory; retrieves relevant past episodes each
-    cycle and exposes `consolidate()` to write new ones. Wraps `memory.Memory`.
-  - **`amygdala.py`** — salience / valence / urgency. Can set `ws.interrupt` to
-    force attention onto a risk; urgent items get high salience so they grab the
-    spotlight.
-  - **`prefrontal.py`** — executive. Reads the conscious workspace and proposes
-    ONE next action from the available effectors; decides when to `finish`.
-  - **`basal_ganglia.py`** — action gating. Approves / repairs / vetoes the
-    prefrontal's proposal (go / no-go). A veto forces a replan next cycle.
-  - **`broca.py`** — language production. Runs once at the end; synthesizes the
-    final user-facing answer from the trace and action history.
+  - **`hippocampus.py`** — episodic memory; mood-congruent retrieval (negative
+    valence biases the query toward worry/regret tokens, positive toward
+    warm/calm), plus a second pass for `prior:*` persona facts. Exposes
+    `consolidate()` to write new episodes.
+  - **`amygdala.py`** — appraisal: writes valence/stress/arousal deltas into
+    `ws.affect`; can set `ws.interrupt` to force attention onto a risk.
+  - **`prefrontal.py`** — **autoregressive stream-of-thought generator**. One
+    `next_thought()` call per chain step, conditioned on the full prior chain
+    + current AffectState + workspace. Mood-voiced; affect modulates
+    temperature (distractibility raises it, stress narrows it). Emits a
+    `ThoughtUnit` with kind ∈ {reflect, recall, appraise, tentative_plan,
+    action, finish, tangent}. Guards against invented effectors — if
+    kind=action with an effector not in the available list, it's demoted to
+    `tentative_plan` rather than dispatched.
+  - **`basal_ganglia.py`** — action gating, mood-modulated: high reward tone
+    loosens vetoes (impulsivity), high conscientiousness tightens them, high
+    agreeableness vetoes potential harm.
+  - **`broca.py`** — language production at the end; voice instructions shaped
+    by current mood (clipped under stress, warmer under positive valence, blunt
+    when agreeableness low). First-person.
+  - **`interoception.py`** — INSULA, deterministic. Reads body state (hunger,
+    fatigue, boredom) and writes affect deltas. Hunger drains valence; fatigue
+    drops arousal; boredom tugs valence down.
+  - **`default_mode.py`** — DMN, probabilistic. Fires when distractibility is
+    high (boredom + fatigue + low arousal, scaled by openness). When it fires
+    it appends a `ThoughtUnit` of kind=tangent directly to `ws.thought_chain`
+    — that's the hijack. Mood-congruent flavor (ruminative when valence low).
+  - **`locus_coeruleus.py`** — LC, deterministic. Arousal gain knob: surprise
+    / failure / interrupt raise arousal, calm cycles drop it.
+  - **`vta.py`** — VTA, deterministic. Reward prediction error from action
+    outcomes (ok → mild positive RPE, err → negative; repeated failures sting
+    more). Updates reward_tone, valence, dominance.
 
 - **`brain/effectors.py`** — the "motor cortex". Filesystem (`read_file`,
   `write_file`, `list_dir`), `shell`, `web_fetch`, plus internal `think`/`finish`.
@@ -110,13 +199,19 @@ chooses `finish` or `max_cycles` is reached, then Broca synthesizes the answer.
 ### Key patterns
 
 - All cognition flows through `Workspace`; regions never call each other
-  directly — they read/write the blackboard. This is the GWT discipline.
-- COBOL-style "fix the generator, not the output" does not apply here, but a
-  parallel rule does: **regions are defined entirely by their system prompt +
-  `step()`**. To change behavior, change the prompt or the step logic, not the
-  workspace.
+  directly — they read/write the blackboard. This is the GWT discipline,
+  preserved even after humanization. Affect mutation by interoception/DMN/VTA/LC
+  happens via `ws.affect.update(...)`, not via region-to-region calls.
+- **Regions are defined entirely by their system prompt + `step()`**. To
+  change behavior, change the prompt or the step logic, not the workspace.
+  The single legitimate way to humanize a region's behavior is to thread
+  `ws.affect.render()` (or specific affect fields) into its prompt.
+- The thought chain is itself a workspace artifact: `ws.thought_chain` is a
+  list of `ThoughtUnit`s. Anything that appends to it (prefrontal, DMN, motor
+  results) becomes visible to the next thought-unit's context.
 - Tiers (`reflex`, `executive`) decouple model choice from region identity.
-  Reflex = fast/cheap regions; executive = stronger planning/output regions.
+  Reflex = fast/cheap; executive = stronger. Deterministic regions (LC, VTA,
+  interoception) are assigned to reflex but make no LLM calls.
 
 ## Configuration (`config.yaml`)
 
@@ -125,10 +220,41 @@ chooses `finish` or `max_cycles` is reached, then Broca synthesizes the answer.
   - reflex default: `google/gemini-3.1-flash-lite-preview` (from `.env`).
   - executive default: `qwen/qwen3.7-plus`.
 - `sandbox_dir` — effector jail (`~/brain/workspace`).
-- `loop.max_cycles`, `loop.attention_decay` — the cognitive loop bounds.
+- `loop.max_cycles` — **cap on thought-chain length** (~6–8 for casual
+  deliberation; raise to 12+ for action-heavy tasks). `loop.attention_decay`
+  — base salience decay; arousal modulates this further.
 - `memory.db_path`, `memory.retrieve_k`.
 - `effectors.{filesystem,shell,web}.enabled` (+ `shell.require_confirmation`).
-- `regions.<name>: <tier>` — per-region tier assignment.
+- `regions.<name>: <tier>` — per-region tier assignment. Includes the new
+  `interoception`, `default_mode`, `locus_coeruleus`, `vta` keys.
+- **`humanize: true|false`** — master switch. False = vanilla GWT brain (no
+  affect, world, DMN, VTA, LC, interoception) for A/B comparison.
+- **`persona_path`** — relative or absolute path to a persona YAML.
+- **`scenario`** — `neutral | calm_morning | deadline_night |
+  boring_afternoon | social_evening | sick_day` (see `brain/world.py`).
+
+CLI overrides: `--persona`, `--scenario`, `--vanilla`, `--seed`.
+
+## Persona files (`personas/*.yaml`)
+
+A persona implicitly defines a person via:
+
+- `identity` — name, age, occupation, location.
+- `history`, `relationships`, `hobbies` — free-text bullets pre-loaded into
+  the hippocampus as `prior:*` episodes (retrievable by the mood-congruent
+  recall query in `hippocampus.step()`).
+- `recent_events` — recent items with optional `affect: {valence, stress, …}`
+  tints applied to the initial AffectState.
+- `dispositions` — free-form tags (e.g. `introvert`, `perfectionist`,
+  `burnt-out`, `empathetic`); each maps to Big-Five-lite trait nudges via
+  `_DISPOSITION_TAGS` in `brain/persona.py`. Tags are stackable.
+- `trait_overrides` (optional) — explicit numeric overrides for any of
+  `neuroticism / extraversion / openness / conscientiousness / agreeableness`.
+  Always win over disposition-derived values.
+
+Two sample personas ship: `personas/alex.yaml` (introvert, perfectionist,
+empathetic, burnt-out, open) and `personas/sam.yaml` (extrovert, easygoing,
+warm, procrastinator) — useful for direct A/B comparison.
 
 ## Evaluation harness (`eval/`)
 
@@ -161,11 +287,35 @@ so the only variable is architecture vs. raw LLM.
 
 ### Offline verification
 
-The verifiers, BFS, generators, and parsers are unit-tested **without network**
-(stubbed LLM): a known optimal 7-move 3-disk solution scores solved; illegal
-moves are caught; the graph BFS and hallucinated-edge detection are checked; the
-config override yields a qwen-only, effectors-off brain. Run those before
-spending API calls.
+The MAP verifiers, BFS, generators, and parsers are unit-tested **without
+network** (stubbed LLM): a known optimal 7-move 3-disk solution scores solved;
+illegal moves are caught; the graph BFS and hallucinated-edge detection are
+checked; the config override yields a qwen-only, effectors-off brain. Run
+those before spending API calls.
+
+### Humanization eval (`eval/humanize.py`, `eval/stream_demo.py`, `eval/quick_smoke.py`)
+
+The point of humanization is not better puzzle-solving — it's producing
+reactions a stateless LLM would not produce. So these evals measure
+**divergence**, not accuracy:
+
+- **`eval/humanize.py`** — divergence battery. A set of mood-sensitive,
+  ambiguous, socially-loaded prompts run under `raw` (zero-shot), `vanilla`
+  (humanize=false), and `human:<persona>:<scenario>` for each scenario in the
+  sweep. Metrics: trigram Jaccard distance vs raw, affect-word density,
+  first-person rate, distraction rate (% spotlights from default_mode/world),
+  DMN fires per run.
+- **`eval/stream_demo.py`** — runs ONE deliberative prompt under multiple
+  scenarios and dumps the full thought chain side-by-side, exposing intrusion
+  marks (`⟪!⟫`) and final affect snapshots.
+- **`eval/quick_smoke.py`** — minimal raw-vs-humanized smoke (one prompt, one
+  scenario) for quick sanity checks.
+
+Offline tests in `tests/test_humanize_offline.py` cover AffectState dynamics,
+persona loading + trait derivation, world ticker, attention-width modulation,
+the DMN-hijack-as-intrusion mechanism (verifies the next prefrontal prompt
+sees the tangent in its thought chain context), and a full one-cycle
+stubbed-LLM brain run.
 
 ## Status / results so far
 
@@ -215,14 +365,26 @@ instructions.
 ## Extending
 
 - **Add a region**: subclass `Region`, give it `name`, `system_prompt`, and a
-  `step(ws)` that posts a `Broadcast`; wire it into `orchestrator.py` and add a
-  tier in `config.yaml` under `regions:`.
-- **Swap memory for vectors**: reimplement `Memory.retrieve/store`; nothing else
-  changes.
+  `step(ws)` that posts a `Broadcast` (and, if it's an affect-producing
+  region, calls `ws.affect.update(...)`); wire it into `orchestrator.py` and
+  add a tier in `config.yaml` under `regions:`.
+- **Swap memory for vectors**: reimplement `Memory.retrieve/store`; nothing
+  else changes. The mood-congruent recall lives in `hippocampus.step()` so it
+  follows the swap.
 - **Add an effector**: add a method in `effectors.py` and list it in
-  `available()`.
+  `available()`. The prefrontal's stream-of-thought guard demotes any
+  `kind=action` with an unknown effector to `kind=tentative_plan`, so adding
+  a new effector is the only way to make a new verb dispatchable.
+- **Add a scenario**: extend `SCENARIOS` in `brain/world.py` with
+  `start_hour`, `ambient`, `init_affect`, `event_rate`, optional
+  `deadline_in_cycles`. New events go into `_EVENT_POOL` with `kind`,
+  `salience`, and `affect_delta`.
+- **Add a disposition tag**: extend `_DISPOSITION_TAGS` in
+  `brain/persona.py` mapping tag → `{trait_name: delta_from_0.5}`. Substring
+  matching is fallback, so multi-word tags work.
 - **Always change the prompt/step, not the workspace**, to alter a region's
-  behavior.
+  behavior. The legitimate way to humanize a region is to thread fields from
+  `ws.affect` into its prompt.
 
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:7510c1e2 -->

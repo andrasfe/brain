@@ -1,47 +1,86 @@
-"""Orchestrator — the reactive cognitive cycle that ties the regions together.
+"""Orchestrator — autoregressive stream-of-thought reasoning loop.
 
-One run() per task. Pipeline per Global Workspace Theory:
+The prior version was a discrete pipeline (perceive → recall → appraise →
+plan → gate → act) repeated each cycle. This version is **autoregressive over
+thought-units**, analogous to next-token prediction:
 
-  perceive (sensory cortex)
-  ┌─ loop until prefrontal 'finish' or max_cycles ─────────────────────────┐
-  │  recall (hippocampus)  → workspace                                      │
-  │  appraise (amygdala)   → workspace, maybe interrupt                     │
-  │  attention spotlight   → broadcast most salient item                    │
-  │  plan (prefrontal)     → propose ONE action                            │
-  │  gate (basal ganglia)  → go / no_go                                    │
-  │  act (effectors)       → result → workspace                           │
-  │  consolidate (hippocampus stores the episode)                          │
-  └────────────────────────────────────────────────────────────────────────┘
-  speak (broca) → final answer
+  perceive (once)
+  loop:
+    world.tick   → ambient stimuli into workspace
+    interoception → body→affect
+    amygdala     → valence/stress writes, maybe interrupt
+    locus_coeruleus → arousal
+    hippocampus  → mood-congruent recall (every K steps)
+    DMN          → maybe inject a tangent INTO THE CHAIN (the hijack)
+    prefrontal.next_thought(chain, ws) → one ThoughtUnit appended to chain
+    if unit.kind == "action":
+      basal_ganglia.gate(unit) → if approved: act, then VTA reward signal
+    elif unit.kind == "finish":
+      stop
+    affect.decay_toward_baseline (slow homeostasis)
+  speak (broca) → final voice (colored by current mood)
+
+The chain IS the reasoning. Other regions tick between thought-units and can
+append their own ThoughtUnits (DMN tangents, amygdala intrusions), which the
+prefrontal sees in its next-step context. That is what makes interruption
+visible *inside* the thought stream, not just between turns.
 """
 from __future__ import annotations
 
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
+from .affect import AffectState, Traits
 from .config import Config
 from .effectors import Effectors
 from .llm import LLM
 from .memory import Memory
+from .persona import Persona, load_persona
 from .regions import (
     Amygdala,
     BasalGanglia,
     Broca,
+    DefaultMode,
     Hippocampus,
+    Interoception,
+    LocusCoeruleus,
     Prefrontal,
     SensoryCortex,
+    VTA,
 )
-from .workspace import ActionRecord, Broadcast, Workspace
+from .workspace import ActionRecord, Broadcast, ThoughtUnit, Workspace
+from .world import World
+
+
+# How often (in thought-units) to re-pull memory and re-tick the world.
+# Memory recall is expensive (DB hit) and world events should be rarer than
+# thoughts (a person doesn't get a new notification every internal sentence).
+_RECALL_EVERY = 3
+_WORLD_EVERY = 2
 
 
 class Brain:
     def __init__(self, cfg: Config, confirm: Callable[[str], bool] | None = None,
-                 log: Callable[[str], None] | None = None):
+                 log: Callable[[str], None] | None = None,
+                 persona: Optional[Persona] = None,
+                 scenario: Optional[str] = None,
+                 humanize: bool = True,
+                 seed: Optional[int] = None):
         self.cfg = cfg
         self.log = log or (lambda _m: None)
         self.llm = LLM(cfg)
         self.memory = Memory(cfg.db_path)
         self.effectors = Effectors(cfg, confirm=confirm)
+        self.humanize = humanize
+        self.seed = seed
 
+        raw = cfg.raw
+        if persona is None:
+            persona = load_persona(raw.get("persona_path"))
+        self.persona = persona
+        self.scenario = scenario or raw.get("scenario") or "neutral"
+        self.world = World(self.scenario, seed=seed) if humanize else None
+
+        # Core regions
         self.sensory = SensoryCortex(cfg, self.llm)
         self.amygdala = Amygdala(cfg, self.llm)
         self.hippocampus = Hippocampus(cfg, self.llm, self.memory)
@@ -49,84 +88,198 @@ class Brain:
         self.basal_ganglia = BasalGanglia(cfg, self.llm)
         self.broca = Broca(cfg, self.llm)
 
+        # Humanization regions
+        if humanize:
+            self.interoception = Interoception(cfg, self.llm)
+            self.default_mode = DefaultMode(cfg, self.llm, seed=seed)
+            self.locus_coeruleus = LocusCoeruleus(cfg, self.llm)
+            self.vta = VTA(cfg, self.llm)
+
+        # Seed memory with persona priors
+        if persona is not None:
+            self._seed_persona_memory(persona)
+
     def close(self) -> None:
         self.llm.close()
         self.memory.close()
 
+    def _seed_persona_memory(self, persona: Persona) -> None:
+        for seed in persona.memory_seeds():
+            self.memory.store(
+                task="persona", kind=seed["kind"],
+                content=seed["content"], salience=float(seed["salience"]),
+            )
+
     # ── main entry point ──────────────────────────────────────────────────────
     def run(self, task: str) -> str:
         cfg_loop = self.cfg.loop
-        ws = Workspace(task=task, decay=float(cfg_loop.get("attention_decay", 0.85)))
-        max_cycles = int(cfg_loop.get("max_cycles", 12))
+        affect = self._build_initial_affect()
+        ws = Workspace(
+            task=task,
+            decay=float(cfg_loop.get("attention_decay", 0.85)),
+            affect=affect,
+        )
+        # `max_cycles` is now reinterpreted as max thought-units, the analogue
+        # of max generated tokens in an autoregressive decoder. The orchestrator
+        # ticks regions between each unit.
+        max_units = int(cfg_loop.get("max_cycles", 12))
 
-        self.log(f"⟶ perceiving task")
+        self.log(f"⟶ perceiving task  [{affect.render()}]")
         self.sensory.step(ws)
 
-        for i in range(1, max_cycles + 1):
-            ws.cycle = i
-            self.log(f"\n── cycle {i} ──────────────────────────────")
+        if self.persona is not None:
+            ws.post(Broadcast(
+                source="self_model", kind="identity",
+                content=self.persona.render_identity_block(),
+                salience=0.6,
+            ))
 
-            # recall + appraise feed the spotlight
-            self.hippocampus.step(ws)
+        # ── stream of thought ──────────────────────────────────────────────
+        commit: Optional[ThoughtUnit] = None
+        step = 0
+        # The orchestrator's `cycle` advances with each thought-unit so that
+        # affect timestamps and consolidation continue to make sense.
+        while step < max_units:
+            step += 1
+            ws.cycle = step
+            self.log(f"\n── step {step} ──────────────────────────────")
+
+            # ── world / body tick (rate-limited) ────────────────────────────
+            if self.humanize and self.world is not None and step % _WORLD_EVERY == 1:
+                stims = self.world.tick()
+                for s in stims:
+                    ws.post(Broadcast(
+                        source="world", kind=s.kind, content=s.content,
+                        salience=s.salience, data=s.data,
+                    ))
+                    if s.affect_delta:
+                        ws.affect.update("world", step, s.affect_delta,
+                                          smoothing=0.8)
+                self.interoception.step(ws)
+
+            # ── recall (rate-limited) ──────────────────────────────────────
+            if step == 1 or step % _RECALL_EVERY == 0:
+                self.hippocampus.step(ws)
+
+            # ── appraise (every step — emotion is continuous) ──────────────
             self.amygdala.step(ws)
             if ws.interrupt:
                 self.log(f"  ! amygdala interrupt: {ws.interrupt}")
 
+            # ── arousal modulation ─────────────────────────────────────────
+            if self.humanize:
+                self.locus_coeruleus.step(ws)
+
+            # ── DMN: maybe hijack the chain (appends a tangent unit) ───────
+            if self.humanize:
+                t = self.default_mode.step(ws)
+                if t:
+                    self.log(f"  ~ mind wanders: {t.content[:80]}")
+                    # IMPORTANT: when DMN appended a unit, the chain has grown
+                    # without the prefrontal speaking. The next prefrontal
+                    # step will see the tangent in its context and either
+                    # recover or drift — that's the hijack. We still want it
+                    # to think this step, but step++ would skip ahead too far.
+                    # So we leave step as-is and let the prefrontal speak next.
+
+            # spotlight
             spotlight = ws.tick_attention()
             if spotlight:
                 self.log(f"  ◎ spotlight: [{spotlight.source}/{spotlight.kind}] "
                          f"{spotlight.content[:80]}")
 
-            # plan
-            plan = self.prefrontal.step(ws, self.effectors.available())
-            proposal = plan.data
-            eff = proposal.get("effector", "think")
-            self.log(f"  ⊕ prefrontal proposes: {eff}")
+            # ── prefrontal next thought (the autoregressive step) ──────────
+            unit = self.prefrontal.next_thought(ws, self.effectors.available())
+            self.log(f"  • thought[{unit.step:02d} {unit.kind}]"
+                     f"{' ⟪after intrusion⟫' if unit.interrupted else ''}: "
+                     f"{unit.content[:100]}")
 
-            if eff == "finish":
-                ws.final_output = proposal.get("args", {}).get("answer")
+            # ── commit gates ───────────────────────────────────────────────
+            if unit.kind == "finish":
+                ws.final_output = (unit.args or {}).get("answer") or unit.content
                 ws.done = True
-                self.log("  ✓ prefrontal signals: finish")
+                commit = unit
+                self.log("  ✓ finish")
                 break
 
-            # gate
-            gate = self.basal_ganglia.step(ws, proposal)
-            if gate.data.get("decision") != "go":
-                self.log(f"  ⊘ basal ganglia veto: {gate.data.get('reason', '')[:80]}")
+            if unit.kind == "action":
+                # basal ganglia gates the action (may veto OR repair args)
+                proposal = {"effector": (unit.args or {}).get("effector", "think"),
+                             "args": (unit.args or {}).get("args") or unit.args,
+                             "reasoning": unit.content}
+                gate = self.basal_ganglia.step(ws, proposal)
+                if gate.data.get("decision") != "go":
+                    self.log(f"  ⊘ basal ganglia veto: "
+                             f"{gate.data.get('reason', '')[:80]}")
+                    ws.post(Broadcast(
+                        source="basal_ganglia", kind="result",
+                        content=f"action vetoed: {gate.data.get('reason', '')}",
+                        salience=0.65,
+                    ))
+                    # Treat veto as a continuation: the chain keeps going.
+                    ws.affect.decay_toward_baseline()
+                    continue
+
+                eff = gate.data.get("effector", proposal["effector"])
+                args = gate.data.get("args") or proposal["args"]
+
+                ok, result = self.effectors.execute(eff, args)
+                self.log(f"  ▶ {eff} -> {'ok' if ok else 'ERR'}: {result[:80]}")
+                ws.history.append(ActionRecord(
+                    cycle=step, effector=eff, args=args, result=result, ok=ok))
                 ws.post(Broadcast(
-                    source="basal_ganglia", kind="result",
-                    content=f"action vetoed: {gate.data.get('reason', '')}",
-                    salience=0.65,
+                    source="motor", kind="result",
+                    content=f"{eff} {'ok' if ok else 'FAILED'}: {result[:200]}",
+                    salience=0.75 if ok else 0.85,
                 ))
-                continue
+                # the motor result is also injected into the chain so the next
+                # thought sees the outcome
+                ws.thought_chain.append(ThoughtUnit(
+                    step=len(ws.thought_chain) + 1,
+                    source="motor",
+                    content=f"{eff} -> {'ok' if ok else 'ERR'}: {result[:160]}",
+                    kind="result",
+                    interrupted=False,
+                    affect_snapshot=ws.affect.mood_label,
+                ))
 
-            # the gate may repair effector/args
-            eff = gate.data.get("effector", eff)
-            args = gate.data.get("args") or proposal.get("args", {})
+                if self.humanize:
+                    self.vta.step(ws)
 
-            # act
-            ok, result = self.effectors.execute(eff, args)
-            self.log(f"  ▶ {eff} -> {'ok' if ok else 'ERR'}: {result[:80]}")
-            ws.history.append(ActionRecord(
-                cycle=i, effector=eff, args=args, result=result, ok=ok))
-            ws.post(Broadcast(
-                source="motor", kind="result",
-                content=f"{eff} {'ok' if ok else 'FAILED'}: {result[:200]}",
-                salience=0.75 if ok else 0.85,
-            ))
+                self.hippocampus.consolidate(
+                    ws, kind="action",
+                    content=f"{eff}({args}) -> {'ok' if ok else 'err'}: {result[:200]}",
+                    salience=0.6 if ok else 0.8,
+                )
 
-            # consolidate to long-term memory
-            self.hippocampus.consolidate(
-                ws, kind="action",
-                content=f"{eff}({args}) -> {'ok' if ok else 'err'}: {result[:200]}",
-                salience=0.6 if ok else 0.8,
-            )
+            # slow homeostasis between thoughts
+            ws.affect.decay_toward_baseline()
 
-        # speak
-        self.log("\n⟶ synthesizing final answer (broca)")
+        # ── speak ──
+        self.log(f"\n⟶ synthesizing final answer (broca)  [{ws.affect.render()}]")
         if ws.final_output:
             answer = ws.final_output
         else:
             answer = self.broca.step(ws)
-        self.hippocampus.consolidate(ws, kind="outcome", content=answer[:500], salience=0.7)
+        self.hippocampus.consolidate(ws, kind="outcome",
+                                      content=answer[:500], salience=0.7)
         return answer
+
+    # ── helpers ──────────────────────────────────────────────────────────────
+    def _build_initial_affect(self) -> AffectState:
+        traits = self.persona.derive_traits() if self.persona else Traits()
+        affect = AffectState(traits=traits)
+        affect.stress = max(affect.stress,
+                            0.10 + 0.25 * (traits.neuroticism - 0.5))
+        affect.curiosity = max(0.2, 0.30 + 0.50 * traits.openness)
+        affect.social_need = max(affect.social_need,
+                                 0.15 + 0.25 * (traits.extraversion - 0.5))
+        if self.persona is not None:
+            ev = self.persona.initial_affect_deltas()
+            if ev:
+                affect.update("persona:init", 0, ev, smoothing=0.5)
+        if self.world is not None:
+            sc = self.world.initial_affect_deltas()
+            if sc:
+                affect.update("world:init", 0, sc, smoothing=0.5)
+        return affect

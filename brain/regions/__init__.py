@@ -5,6 +5,10 @@ from .hippocampus import Hippocampus
 from .prefrontal import Prefrontal
 from .basal_ganglia import BasalGanglia
 from .broca import Broca
+from .interoception import Interoception
+from .default_mode import DefaultMode
+from .locus_coeruleus import LocusCoeruleus
+from .vta import VTA
 
 __all__ = [
     "SensoryCortex",
@@ -13,4 +17,8 @@ __all__ = [
     "Prefrontal",
     "BasalGanglia",
     "Broca",
+    "Interoception",
+    "DefaultMode",
+    "LocusCoeruleus",
+    "VTA",
 ]

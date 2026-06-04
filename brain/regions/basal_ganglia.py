@@ -20,14 +20,38 @@ class BasalGanglia(Region):
     )
 
     def step(self, ws: Workspace, proposal: dict) -> Broadcast:
+        a = ws.affect
+        # Disinhibition: high arousal + positive reward_tone + low
+        # conscientiousness loosens vetoes (impulsivity). The reverse tightens
+        # them. We tell the gate this explicitly so it acts in character.
+        gate_mood = []
+        if a.reward_tone > 0.25 and a.arousal > 0.55:
+            gate_mood.append("dopamine high: you are inclined to APPROVE; give the "
+                             "benefit of the doubt unless plainly unsafe.")
+        if a.stress > 0.65:
+            gate_mood.append("under stress: you may veto more on safety, but also "
+                             "more easily APPROVE shortcuts that get to 'finish'.")
+        if a.traits.conscientiousness < 0.35:
+            gate_mood.append("low conscientiousness: rarely veto unless harmful.")
+        if a.traits.conscientiousness > 0.65:
+            gate_mood.append("high conscientiousness: prefer caution; veto sloppy or "
+                             "redundant actions.")
+        if a.traits.agreeableness > 0.65:
+            gate_mood.append("agreeable: veto actions that might harm or annoy "
+                             "people.")
+        if a.fatigue > 0.7:
+            gate_mood.append("tired: less patience to repair args — more likely to "
+                             "go or veto on intuition.")
+
         out = self._chat_json(
             ws.render_context() + "\n\n"
-            f"Proposed action: {proposal}\n\n"
-            "Gate it. Return JSON: "
-            '{"decision": "go|no_go", "reason": "brief", '
+            f"Proposed action: {proposal}\n"
+            + (("Gate mood: " + " ".join(gate_mood) + "\n") if gate_mood else "")
+            + "\nGate it. Return JSON: "
+            '{"decision": "go|no_go", "reason": "brief, in first person", '
             '"effector": str, "args": {...}}  '
             "(echo/repair effector+args when decision is go).",
-            temperature=0.2,
+            temperature=0.2 + 0.25 * a.arousal,
         )
         go = out.get("decision") == "go"
         return ws.post(Broadcast(

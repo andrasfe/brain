@@ -1,0 +1,32 @@
+# A contrasting persona — extroverted, low-conscientiousness, calmer baseline.
+identity:
+  name: "Sam Park"
+  age: 29
+  occupation: "freelance illustrator"
+  location: "Berlin"
+
+history:
+  - "art school in Glasgow"
+  - "started freelancing two years ago after burnout at an agency"
+
+relationships:
+  - "partner Alex, six years"
+  - "loud chat of art-school friends across three time zones"
+
+recent_events:
+  - text: "landed a cover commission for a magazine yesterday"
+    affect: {valence: +0.15, dominance: +0.05}
+  - text: "father's routine surgery is this week"
+    affect: {stress: +0.08, valence: -0.05}
+
+hobbies:
+  - "drawing"
+  - "house plants"
+  - "techno DJ sets"
+
+dispositions:
+  - "extrovert"
+  - "creative"
+  - "easygoing"
+  - "procrastinator"
+  - "warm"

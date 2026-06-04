@@ -60,6 +60,14 @@ def load_config(path: str | Path | None = None) -> Config:
     sandbox = _expand(raw["sandbox_dir"])
     sandbox.mkdir(parents=True, exist_ok=True)
 
+    # Resolve persona_path relative to repo root if relative.
+    pp = raw.get("persona_path")
+    if pp:
+        pp_path = Path(os.path.expanduser(pp))
+        if not pp_path.is_absolute():
+            pp_path = (_REPO_ROOT / pp_path).resolve()
+        raw["persona_path"] = str(pp_path)
+
     return Config(
         raw=raw,
         api_key=api_key,

@@ -35,6 +35,16 @@ def main() -> int:
     ap.add_argument("--quiet", action="store_true", help="hide the cognitive trace")
     ap.add_argument("--yes", action="store_true", help="auto-approve shell commands")
     ap.add_argument("--config", default=None, help="path to config.yaml")
+    ap.add_argument("--persona", default=None,
+                    help="override persona file path (default from config.yaml)")
+    ap.add_argument("--scenario", default=None,
+                    help="override scenario (neutral | calm_morning | deadline_night "
+                         "| boring_afternoon | social_evening | sick_day)")
+    ap.add_argument("--vanilla", action="store_true",
+                    help="disable humanization (no affect, no world, no DMN) "
+                         "for A/B comparison with the original brain")
+    ap.add_argument("--seed", type=int, default=None,
+                    help="RNG seed for world ticker and DMN (reproducibility)")
     args = ap.parse_args()
 
     task = " ".join(args.task).strip() or input("Task: ").strip()
@@ -43,8 +53,16 @@ def main() -> int:
         return 1
 
     cfg = load_config(args.config)
+    # CLI overrides go into raw so Brain.__init__ picks them up
+    if args.persona is not None:
+        cfg.raw["persona_path"] = args.persona
+    if args.scenario is not None:
+        cfg.raw["scenario"] = args.scenario
+    humanize = (not args.vanilla) and bool(cfg.raw.get("humanize", True))
+
     log = (lambda _m: None) if args.quiet else (lambda m: print(m, flush=True))
-    brain = Brain(cfg, confirm=make_confirm(args.yes), log=log)
+    brain = Brain(cfg, confirm=make_confirm(args.yes), log=log,
+                  humanize=humanize, seed=args.seed)
     try:
         answer = brain.run(task)
     finally:

@@ -18,8 +18,12 @@ openrouter:
 sandbox_dir: "~/brain/workspace"
 
 # The reactive cognitive loop.
+# Note: with the autoregressive stream-of-thought prefrontal, `max_cycles` is
+# reinterpreted as the max number of thought-units in the chain (the analogue
+# of max generated tokens). 6–8 is a good range for deliberation; raise to
+# 12+ for action-heavy tasks that need many tool calls.
 loop:
-  max_cycles: 12          # hard cap on cognitive cycles per task
+  max_cycles: 8
   attention_decay: 0.85   # how fast un-rebroadcast items lose salience each cycle
 
 memory:
@@ -39,9 +43,27 @@ effectors:
 
 # Region → tier assignment. Tweak freely.
 regions:
-  sensory_cortex: reflex
-  amygdala:       reflex
-  basal_ganglia:  reflex
-  hippocampus:    reflex
-  prefrontal:     executive
-  broca:          executive
+  sensory_cortex:    reflex
+  amygdala:          reflex
+  basal_ganglia:     reflex
+  hippocampus:       reflex
+  prefrontal:        executive
+  broca:             executive
+  # humanization regions
+  interoception:     reflex   # deterministic, no LLM call anyway
+  default_mode:      reflex   # tangents should feel half-formed
+  locus_coeruleus:   reflex   # deterministic
+  vta:               reflex   # deterministic
+
+# Humanization — persistent mood/drives/distractions and an ambient world.
+# Set humanize=false to fall back to the vanilla GWT brain (for A/B eval).
+humanize: true
+
+# Loadable persona file (biographical priors + implicit Big-Five-lite traits).
+# Each persona seeds AffectState.traits and pre-loads facts into hippocampus.
+persona_path: "personas/alex.yaml"
+
+# Ambient world scenario. See brain/world.py SCENARIOS:
+#   neutral | calm_morning | deadline_night | boring_afternoon |
+#   social_evening | sick_day
+scenario: "boring_afternoon"

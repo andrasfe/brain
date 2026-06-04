@@ -11,6 +11,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from .affect import AffectState
+
 
 @dataclass
 class Broadcast:
@@ -34,8 +36,30 @@ class ActionRecord:
     ok: bool
 
 
+@dataclass
+class ThoughtUnit:
+    """One step of the autoregressive 'stream of thought'.
+
+    A ThoughtUnit is the analogue of a token in next-token prediction: the
+    prefrontal produces one at a time, conditioned on the full chain so far
+    plus the current AffectState and workspace. Other regions tick *between*
+    units and can perturb the chain — a DMN tangent inserts a unit from
+    source='default_mode', an amygdala interrupt forces the next unit to
+    address the threat, a body signal can pivot the chain mid-argument.
+    """
+    step: int                         # position in the chain (1-indexed)
+    source: str                       # "prefrontal" | "default_mode" | "amygdala_intrusion" | "interoception_intrusion"
+    content: str                      # the natural-language thought
+    kind: str                         # reflect | recall | appraise | tentative_plan | action | finish | tangent
+    args: dict[str, Any] = field(default_factory=dict)  # for action/finish
+    affect_snapshot: str = ""         # mood at the moment of this thought
+    interrupted: bool = False         # True if a prior region perturbed this step
+    ts: float = field(default_factory=time.time)
+
+
 class Workspace:
-    def __init__(self, task: str, decay: float = 0.85):
+    def __init__(self, task: str, decay: float = 0.85,
+                 affect: Optional[AffectState] = None):
         self.task: str = task
         self.decay: float = decay
         self.cycle: int = 0
@@ -44,6 +68,14 @@ class Workspace:
         self.done: bool = False
         self.final_output: Optional[str] = None
         self.interrupt: Optional[str] = None  # set by amygdala for urgent salience
+        # Persistent affective state — read by all regions, mutated by
+        # affect-producing regions (amygdala/interoception/VTA/LC).
+        self.affect: AffectState = affect if affect is not None else AffectState()
+        # Autoregressive stream of thought — each unit is the analogue of a
+        # token in next-token prediction. The prefrontal extends this chain
+        # one unit at a time; other regions can also append (DMN tangents,
+        # amygdala intrusions) — that IS the interruption mechanism.
+        self.thought_chain: list[ThoughtUnit] = []
 
     # ── posting / reading ────────────────────────────────────────────────────
     def post(self, b: Broadcast) -> Broadcast:
@@ -72,26 +104,57 @@ class Workspace:
     def tick_attention(self) -> Optional[Broadcast]:
         """Decay old salience, then promote the most salient un-broadcast item.
 
+        Affect modulates this: high arousal narrows attention (the spotlight is
+        sharper — only the very top item gets in), low arousal widens it (a
+        random-ish second-tier item can win when the brain is wandering).
+
         Returns the newly broadcast item (the cycle's "conscious content"), if any.
         """
+        # Arousal-modulated decay: high arousal => sharper decay of stale items
+        decay = self.decay * (0.85 + 0.25 * (1 - self.affect.arousal))
         for b in self.items:
             if b.broadcast:
-                b.salience *= self.decay
+                b.salience *= decay
 
         candidates = [b for b in self.items if not b.broadcast]
         if not candidates:
             return None
-        winner = max(candidates, key=lambda b: b.salience)
+        candidates.sort(key=lambda b: b.salience, reverse=True)
+        # Wide attention (low arousal) lets a less-salient runner-up sometimes
+        # win — deterministic but state-dependent: when distractibility is high
+        # AND there's a DMN/world item near the top, allow it to grab the spotlight.
+        if (self.affect.distractibility > 0.55
+                and len(candidates) > 1
+                and candidates[1].source in {"default_mode", "world"}
+                and candidates[1].salience > 0.5 * candidates[0].salience):
+            winner = candidates[1]
+        else:
+            winner = candidates[0]
         winner.broadcast = True
         return winner
 
     # ── rendering for prompts ────────────────────────────────────────────────
     def render_context(self, limit: int = 12) -> str:
-        """A compact view of the conscious workspace for region prompts."""
-        lines = [f"TASK: {self.task}", f"CYCLE: {self.cycle}"]
+        """A compact view of the conscious workspace for region prompts.
+
+        Includes the persistent AffectState so every region's decisions are
+        colored by mood — this is the main mechanism that makes the brain's
+        outputs diverge from a raw stateless LLM call.
+        """
+        lines = [f"TASK: {self.task}", f"CYCLE: {self.cycle}", self.affect.render()]
         if self.interrupt:
             lines.append(f"!! INTERRUPT (amygdala): {self.interrupt}")
-        spot = self.broadcasts()[:limit]
+        # Arousal narrows attention: under high arousal show fewer items
+        eff_limit = max(3, int(limit * self.affect.attention_width))
+        spot = self.broadcasts()[:eff_limit]
+        # Render the recent thought chain — same logic as autoregressive
+        # token-conditioning: the next thought sees the prior chain.
+        if self.thought_chain:
+            lines.append("\nTHOUGHT CHAIN (most recent last — your inner monologue):")
+            for t in self.thought_chain[-10:]:
+                tag = t.source if t.source != "prefrontal" else "you"
+                interrupt_mark = "⟪!⟫ " if t.interrupted else ""
+                lines.append(f"  {interrupt_mark}[{t.step:02d} {tag}/{t.kind}] {t.content}")
         if spot:
             lines.append("\nCONSCIOUS WORKSPACE (most salient first):")
             for b in spot:
