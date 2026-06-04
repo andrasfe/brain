@@ -2,12 +2,19 @@
 
 Each effector takes a dict of args and returns (ok, result_text). The basal
 ganglia selects an action; the orchestrator dispatches it here.
+
+Two internal effectors that don't touch the sandbox or network:
+  - `think`: a no-op for pure reasoning steps.
+  - `remind_self`: register a prospective-memory item that re-surfaces in a
+    future cycle when its trigger matches (keyword in percept / substring /
+    absolute time). The brain's way of writing a sticky note to itself.
 """
 from __future__ import annotations
 
 import subprocess
+import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 import httpx
 
@@ -15,12 +22,15 @@ from .config import Config
 
 
 class Effectors:
-    def __init__(self, cfg: Config, confirm: Callable[[str], bool] | None = None):
+    def __init__(self, cfg: Config, confirm: Callable[[str], bool] | None = None,
+                 memory: Optional[Any] = None):
         self.cfg = cfg
         self.sandbox = cfg.sandbox_dir
         self.eff_cfg = cfg.effectors
         # confirm(prompt) -> bool; defaults to auto-allow (used in non-interactive runs)
         self.confirm = confirm or (lambda _msg: True)
+        # memory may be None during tests/eval — `remind_self` becomes a no-op.
+        self.memory = memory
 
     # ── dispatch ──────────────────────────────────────────────────────────────
     def available(self) -> list[str]:
@@ -31,7 +41,7 @@ class Effectors:
             names += ["shell"]
         if self.eff_cfg.get("web", {}).get("enabled"):
             names += ["web_fetch"]
-        names += ["think", "finish"]  # always-available internal effectors
+        names += ["think", "remind_self", "finish"]  # always-available internal effectors
         return names
 
     def execute(self, name: str, args: dict[str, Any]) -> tuple[bool, str]:
@@ -42,6 +52,7 @@ class Effectors:
             "shell": self._shell,
             "web_fetch": self._web_fetch,
             "think": self._think,
+            "remind_self": self._remind_self,
         }.get(name)
         if fn is None:
             return False, f"unknown effector: {name}"
@@ -115,3 +126,38 @@ class Effectors:
     def _think(self, args: dict[str, Any]) -> tuple[bool, str]:
         """A no-op effector for pure reasoning steps."""
         return True, args.get("note", "(thought)")
+
+    def _remind_self(self, args: dict[str, Any]) -> tuple[bool, str]:
+        """Register a prospective-memory item to re-surface later.
+
+        Args:
+          content: the reminder text (what to remember)
+          trigger: 'keyword' | 'percept' | 'time' — how to detect re-surfacing
+          pattern: query string (keyword/percept) or seconds-from-now (time)
+          salience: 0..1, optional (default 0.75)
+        """
+        if self.memory is None:
+            return False, "remind_self: memory not attached"
+        content = (args.get("content") or "").strip()
+        if not content:
+            return False, "remind_self: empty content"
+        trigger = (args.get("trigger") or "keyword").lower()
+        pattern = str(args.get("pattern") or "").strip()
+        salience = float(args.get("salience", 0.75))
+        fires_after = None
+        if trigger == "time":
+            try:
+                seconds = float(pattern)
+                fires_after = time.time() + seconds
+            except ValueError:
+                return False, f"remind_self: time trigger needs numeric seconds, got {pattern!r}"
+        if trigger not in ("keyword", "percept", "time"):
+            return False, f"remind_self: unknown trigger {trigger!r}"
+        if trigger != "time" and not pattern:
+            return False, "remind_self: pattern required for keyword/percept"
+        pid = self.memory.prospective_register(
+            content=content, trigger_kind=trigger,
+            trigger_pattern=pattern, salience=salience,
+            fires_after_ts=fires_after,
+        )
+        return True, f"reminder #{pid} registered ({trigger}: {pattern[:40]})"

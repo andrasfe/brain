@@ -31,9 +31,10 @@ from typing import Any, Callable, Optional
 
 from .affect import AffectState, Traits
 from .config import Config
+from . import consolidator as _consolidator
 from .effectors import Effectors
 from .llm import LLM
-from .memory import Memory
+from .memory import EPISODIC, Memory, SEMANTIC
 from .persona import Persona, load_persona
 from .skills import SkillStore, prediction_surprise, signature_from_percept
 from .regions import (
@@ -73,7 +74,9 @@ class Brain:
         # The skill store shares the memory db on purpose: skills are a kind
         # of procedural memory and persist across runs alongside episodes.
         self.skills = SkillStore(cfg.db_path)
-        self.effectors = Effectors(cfg, confirm=confirm)
+        # Effectors get a memory handle so `remind_self` can register
+        # prospective items the hippocampus will surface later.
+        self.effectors = Effectors(cfg, confirm=confirm, memory=self.memory)
         self.humanize = humanize
         self.seed = seed
 
@@ -367,6 +370,24 @@ class Brain:
             answer = self.broca.step(ws)
         self.hippocampus.consolidate(ws, kind="outcome",
                                       content=answer[:500], salience=0.7)
+
+        # End-of-task consolidation pass: extract recurring patterns from
+        # recent episodic rows into durable semantic facts. Small and cheap
+        # here (≤ 2 facts); `python -m brain.consolidator` does deeper sleep.
+        try:
+            stats = _consolidator.consolidate(
+                self.memory, self.llm,
+                model=self.cfg.models.get("reflex"),
+                n_episodes=int(self.cfg.memory.get("consolidate_window", 40)),
+                min_cluster_size=int(self.cfg.memory.get("consolidate_min_cluster", 3)),
+                max_new_facts=int(self.cfg.memory.get("consolidate_max_facts", 2)),
+                log=self.log,
+            )
+            if stats.get("facts_written"):
+                self.log(f"  ⤷ consolidator wrote {stats['facts_written']} "
+                         f"semantic fact(s) from {stats['rows_tagged']} episode(s)")
+        except Exception as e:  # noqa: BLE001 — never let consolidation fail a run
+            self.log(f"  ⚠ consolidator skipped: {type(e).__name__}: {e}")
         return answer
 
     # ── helpers ──────────────────────────────────────────────────────────────

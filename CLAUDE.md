@@ -56,6 +56,10 @@ python3 -m eval.humanize --n 4                   # divergence battery vs raw
 python3 -m eval.quick_smoke                      # minimal raw-vs-humanized smoke
 python3 -m eval.stream_demo                      # show chain unfolding per scenario
 
+# offline 'sleep' pass — distill episodic clusters into semantic facts
+python3 -m brain.consolidator --n 200 --max-facts 10
+python3 -m brain.consolidator --dry-run          # cluster + tag, no LLM
+
 # offline tests (no network, no API key)
 python3 -m unittest tests.test_humanize_offline -v
 
@@ -142,6 +146,26 @@ either recovers ("Forget the cat; …") or drifts.
   notifications, social pings, deadline pressure) which the orchestrator
   posts to the workspace as `source="world"` broadcasts.
 
+- **`brain/memory.py`** — typed memory with `mem_type` ∈ {episodic, semantic,
+  prospective, affect, source}. `retrieve(query, types=...)` is the cheap
+  keyword baseline; `retrieve_semantic(query, types=...)` is TF-IDF cosine
+  via `brain/tfidf.py` (pure Python, no deps; vocab-capped, lazily refit
+  every N inserts). `prospective_register/match/mark_fired` handle the
+  intention table. Memory stays LLM-free — the consolidator owns LLM calls.
+  Schema auto-migrates older single-bucket DBs in place (ALTERs add the
+  missing columns, then builds the new indexes).
+
+- **`brain/tfidf.py`** — `TfidfIndex` with cosine `topk` and an `eligible`
+  filter so typed retrieval doesn't pay for full-corpus scoring.
+
+- **`brain/consolidator.py`** — the offline "sleep" pass. Greedy single-link
+  clustering of recent episodic rows by TF-IDF cosine, then an LLM call per
+  eligible cluster to distill ONE durable semantic fact (≤ 20 words, first
+  person). Tags consolidated rows so they aren't reprocessed. Runs in two
+  contexts: (a) at end of `Brain.run(task)` as a small cheap pass (≤ 2
+  facts), (b) standalone CLI `python -m brain.consolidator` for the deeper
+  sleep sweep over accumulated runs.
+
 - **`brain/skills.py`** — `SkillStore` (the procedural-memory / System-1
   substrate) + `signature_from_percept` + `prediction_surprise`.
   Skills are `(signature, effector, args)` tuples cached in the same SQLite
@@ -170,10 +194,10 @@ either recovers ("Forget the cat; …") or drifts.
 - **`brain/regions/`** — one agent per region:
   - **`sensory_cortex.py`** — perception. Runs once; parses the raw task into a
     structured percept (goal, entities, constraints, success criterion).
-  - **`hippocampus.py`** — episodic memory; mood-congruent retrieval (negative
-    valence biases the query toward worry/regret tokens, positive toward
-    warm/calm), plus a second pass for `prior:*` persona facts. Exposes
-    `consolidate()` to write new episodes.
+  - **`hippocampus.py`** — typed retrieval (semantic via TF-IDF + episodic
+    via mood-congruent keyword overlap + persona priors), prospective trigger
+    matching every cycle, deduped into one `memory` broadcast. `consolidate()`
+    tags writes with a `mem_type` and an affect snapshot at encode time.
   - **`amygdala.py`** — appraisal: writes valence/stress/arousal deltas into
     `ws.affect`; can set `ws.interrupt` to force attention onto a risk.
   - **`prefrontal.py`** — **autoregressive stream-of-thought generator**. One

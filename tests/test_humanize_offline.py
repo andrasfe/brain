@@ -302,6 +302,169 @@ class SkillStoreTests(unittest.TestCase):
         self.assertTrue(_habit_conditions_met(ws))
 
 
+class TypedMemoryTests(unittest.TestCase):
+    """Typed schema + TF-IDF semantic retrieval + prospective triggers."""
+
+    def _fresh(self):
+        from brain.memory import Memory
+        tmp = Path(tempfile.mkdtemp()) / "m.sqlite"
+        return Memory(tmp, tfidf_refit_every=2)
+
+    def test_typed_store_and_retrieve(self):
+        from brain.memory import EPISODIC, SEMANTIC, AFFECT
+        m = self._fresh()
+        m.store("t", "action", "wrote primes.py and ran it", 0.6,
+                mem_type=EPISODIC)
+        m.store("t", "distilled", "I tend to leave shell quoting half-done",
+                0.8, mem_type=SEMANTIC)
+        m.store("t", "tag", "the basement office feels uneasy at night",
+                0.7, mem_type=AFFECT)
+        all_eps = m.recent(10)
+        self.assertEqual(len(all_eps), 3)
+        only_sem = m.retrieve("quoting", k=3, types=[SEMANTIC])
+        # semantic row matches
+        self.assertTrue(any("quoting" in r["content"] for r in only_sem))
+        # episodic-only query should NOT pull the semantic row
+        only_epi = m.retrieve("quoting", k=3, types=[EPISODIC])
+        self.assertFalse(any(r["mem_type"] == SEMANTIC for r in only_epi))
+        m.close()
+
+    def test_tfidf_semantic_retrieval(self):
+        from brain.memory import EPISODIC
+        m = self._fresh()
+        m.store("t", "a", "running a marathon and the city is glittering", 0.7)
+        m.store("t", "a", "I baked sourdough and the kitchen smelled warm", 0.7)
+        m.store("t", "a", "long run through the park, slow pace, calm breathing", 0.7)
+        m.store("t", "a", "tax forms and quarterly receipts in a manila folder", 0.7)
+        # query about running should rank the two running rows above sourdough/tax
+        hits = m.retrieve_semantic("training plan for distance running", k=2,
+                                    types=[EPISODIC])
+        joined = " ".join(h["content"] for h in hits)
+        self.assertIn("run", joined)
+        self.assertNotIn("tax", joined)
+        m.close()
+
+    def test_prospective_keyword_trigger(self):
+        m = self._fresh()
+        pid = m.prospective_register(
+            content="remind me to send the bug report",
+            trigger_kind="keyword",
+            trigger_pattern="auth login token",
+            salience=0.9,
+        )
+        # Unrelated percept → no fire
+        self.assertEqual(m.prospective_match("write a haiku about clouds"), [])
+        # Matching percept → fires
+        hits = m.prospective_match("the auth middleware needs a check")
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["id"], pid)
+        m.prospective_mark_fired([pid])
+        self.assertEqual(m.prospective_pending()[0]["fired_count"], 1)
+        m.close()
+
+    def test_prospective_time_trigger(self):
+        m = self._fresh()
+        pid = m.prospective_register(
+            content="call back in a moment",
+            trigger_kind="time",
+            trigger_pattern="0",
+            salience=0.8,
+            fires_after_ts=0,  # already past
+        )
+        hits = m.prospective_match("any percept here")
+        self.assertTrue(any(h["id"] == pid for h in hits))
+        m.close()
+
+    def test_migration_on_legacy_db(self):
+        """A pre-typed-schema db should auto-migrate without losing rows."""
+        from brain.memory import Memory
+        import sqlite3
+        tmp = Path(tempfile.mkdtemp()) / "legacy.sqlite"
+        # Create the legacy single-bucket schema by hand
+        conn = sqlite3.connect(str(tmp))
+        conn.execute("""CREATE TABLE episodes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts REAL NOT NULL, task TEXT NOT NULL, kind TEXT NOT NULL,
+            content TEXT NOT NULL, salience REAL NOT NULL DEFAULT 0.5)""")
+        conn.execute("INSERT INTO episodes (ts, task, kind, content, salience) "
+                     "VALUES (?,?,?,?,?)",
+                     (1.0, "legacy", "action", "old row", 0.5))
+        conn.commit()
+        conn.close()
+        # Memory() should ALTER it in place
+        m = Memory(tmp)
+        rows = m.recent(5)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["mem_type"], "episodic")  # default applied
+        # New typed write works
+        m.store("new", "distilled", "the kitchen sink", 0.7, mem_type="semantic")
+        self.assertEqual(m.count("semantic"), 1)
+        m.close()
+
+
+class ConsolidatorTests(unittest.TestCase):
+    def test_clusters_similar_episodes_and_tags(self):
+        from brain.memory import EPISODIC, Memory
+        from brain import consolidator
+        tmp = Path(tempfile.mkdtemp()) / "c.sqlite"
+        m = Memory(tmp)
+        for txt in [
+            "wrote primes.py in python and tested with pytest",
+            "wrote fibonacci.py in python and ran tests",
+            "python script for primes, all tests passing",
+            "added unit tests to the python utilities module",
+            "weather is cold and the radiator clicks loudly",
+        ]:
+            m.store("dev", "action", txt, 0.6, mem_type=EPISODIC)
+        # Dry run (no LLM): should still cluster + tag rows so they don't reprocess
+        stats = consolidator.consolidate(
+            m, llm=None, model=None, n_episodes=20,
+            min_cluster_size=3, max_new_facts=5,
+            cluster_threshold=0.05, log=lambda _m: None,
+        )
+        self.assertGreaterEqual(stats["clusters"], 1)
+        self.assertGreater(stats["rows_tagged"], 0)
+        # Second pass on the same rows yields no NEW tagging because they're
+        # already marked consolidated.
+        stats2 = consolidator.consolidate(
+            m, llm=None, model=None, n_episodes=20,
+            min_cluster_size=3, max_new_facts=5,
+            cluster_threshold=0.05, log=lambda _m: None,
+        )
+        self.assertEqual(stats2["rows_tagged"], 0)
+        m.close()
+
+    def test_llm_extraction_writes_semantic(self):
+        from brain.memory import EPISODIC, SEMANTIC, Memory
+        from brain import consolidator
+        from unittest.mock import MagicMock
+        tmp = Path(tempfile.mkdtemp()) / "c.sqlite"
+        m = Memory(tmp)
+        for txt in [
+            "shell quoting got me again on a one-liner",
+            "another bash quoting tangle, fixed eventually",
+            "single-vs-double quotes in shell tripped me up",
+        ]:
+            m.store("dev", "action", txt, 0.6, mem_type=EPISODIC)
+        llm = MagicMock()
+        llm.chat.return_value = "I keep struggling with shell quoting."
+        # Tiny corpora produce low TF-IDF cosines; lower the cluster
+        # threshold to match. Production runs with 40+ episodes work fine
+        # at the default 0.18.
+        stats = consolidator.consolidate(
+            m, llm=llm, model="fake",
+            n_episodes=20, min_cluster_size=3, max_new_facts=2,
+            cluster_threshold=0.05,
+            log=lambda _m: None,
+        )
+        self.assertGreaterEqual(stats["facts_written"], 1)
+        # The new semantic row is queryable
+        sem = m.retrieve("quoting", k=3, types=[SEMANTIC])
+        self.assertTrue(sem)
+        self.assertIn("quoting", sem[0]["content"].lower())
+        m.close()
+
+
 class PredictiveCodingTests(unittest.TestCase):
     def test_surprise_score(self):
         from brain.skills import prediction_surprise
