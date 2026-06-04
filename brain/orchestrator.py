@@ -35,6 +35,7 @@ from .effectors import Effectors
 from .llm import LLM
 from .memory import Memory
 from .persona import Persona, load_persona
+from .skills import SkillStore, prediction_surprise, signature_from_percept
 from .regions import (
     Amygdala,
     BasalGanglia,
@@ -69,6 +70,9 @@ class Brain:
         self.log = log or (lambda _m: None)
         self.llm = LLM(cfg)
         self.memory = Memory(cfg.db_path)
+        # The skill store shares the memory db on purpose: skills are a kind
+        # of procedural memory and persist across runs alongside episodes.
+        self.skills = SkillStore(cfg.db_path)
         self.effectors = Effectors(cfg, confirm=confirm)
         self.humanize = humanize
         self.seed = seed
@@ -102,6 +106,7 @@ class Brain:
     def close(self) -> None:
         self.llm.close()
         self.memory.close()
+        self.skills.close()
 
     def _seed_persona_memory(self, persona: Persona) -> None:
         for seed in persona.memory_seeds():
@@ -188,6 +193,67 @@ class Brain:
                 self.log(f"  ◎ spotlight: [{spotlight.source}/{spotlight.kind}] "
                          f"{spotlight.content[:80]}")
 
+            # ── direct-path habit-fire (System-1, no LLM) ──────────────────
+            # The basal ganglia consults the SkillStore for a cached action
+            # for this percept signature. If a fireable skill exists AND the
+            # psychological conditions allow (no interrupt, low surprise,
+            # cognitive load, low curiosity), we skip the prefrontal entirely.
+            ws.habit_fired = False
+            habit_proposal = self.basal_ganglia.propose_habit(ws, self.skills)
+            if habit_proposal is not None:
+                self.log(f"  ⚡ habit fires (no PFC): {habit_proposal['effector']} "
+                         f"{habit_proposal['reasoning']}")
+                ws.habit_fired = True
+                # Append a synthetic ThoughtUnit so the chain still reads as
+                # a continuous stream (BG-sourced, kind=action).
+                ws.thought_chain.append(ThoughtUnit(
+                    step=len(ws.thought_chain) + 1,
+                    source="basal_ganglia",
+                    content=f"(reflex) {habit_proposal['reasoning']}",
+                    kind="action",
+                    args={"effector": habit_proposal["effector"],
+                           "args": habit_proposal["args"]},
+                    affect_snapshot=ws.affect.mood_label,
+                    interrupted=False,
+                ))
+                eff = habit_proposal["effector"]
+                args = habit_proposal["args"]
+                ok, result = self.effectors.execute(eff, args)
+                self.log(f"  ▶ {eff} -> {'ok' if ok else 'ERR'}: {result[:80]}")
+                ws.history.append(ActionRecord(
+                    cycle=step, effector=eff, args=args,
+                    result=result, ok=ok))
+                ws.post(Broadcast(
+                    source="motor", kind="result",
+                    content=f"{eff} {'ok' if ok else 'FAILED'}: {result[:200]}",
+                    salience=0.75 if ok else 0.85,
+                ))
+                ws.thought_chain.append(ThoughtUnit(
+                    step=len(ws.thought_chain) + 1, source="motor",
+                    content=f"{eff} -> {'ok' if ok else 'ERR'}: {result[:160]}",
+                    kind="result", affect_snapshot=ws.affect.mood_label,
+                ))
+                # Skill update on the habit-fire outcome itself
+                sig = ws.last_habit_signature or "<unknown>"
+                self.skills.consolidate(sig, eff, args, ok, outcome=result)
+                if not ok:
+                    # The cached habit failed — decay its confidence so the
+                    # next encounter falls back to System-2.
+                    self.skills.punish(habit_proposal["_skill_id"])
+                if self.humanize:
+                    self.vta.step(ws)
+                self.hippocampus.consolidate(
+                    ws, kind="action",
+                    content=f"(habit) {eff}({args}) -> "
+                            f"{'ok' if ok else 'err'}: {result[:200]}",
+                    salience=0.6 if ok else 0.8,
+                )
+                # Habit-fire had no prediction, so no surprise this cycle
+                ws.last_prediction = None
+                ws.last_surprise = 0.0
+                ws.affect.decay_toward_baseline()
+                continue
+
             # ── prefrontal next thought (the autoregressive step) ──────────
             unit = self.prefrontal.next_thought(ws, self.effectors.available())
             self.log(f"  • thought[{unit.step:02d} {unit.kind}]"
@@ -243,8 +309,46 @@ class Brain:
                     affect_snapshot=ws.affect.mood_label,
                 ))
 
+                # ── predictive coding: compare expected_result to actual ──
+                # The prefrontal stashed its prediction in ws.last_prediction
+                # when it emitted this action. We compute trigram surprise
+                # and use it to (a) modulate LC arousal, (b) post a
+                # prediction_error broadcast that competes for the spotlight
+                # next cycle, (c) break habit-fire on the following step.
+                surprise = prediction_surprise(ws.last_prediction or "", result)
+                ws.last_surprise = surprise
+                if ws.last_prediction and surprise > 0.0:
+                    self.log(f"  ◊ prediction surprise: {surprise:.2f} "
+                             f"(expected: {ws.last_prediction[:60]})")
+                if surprise > 0.55:
+                    ws.post(Broadcast(
+                        source="prediction_error", kind="surprise",
+                        content=f"surprise={surprise:.2f}: expected "
+                                f"\"{(ws.last_prediction or '')[:80]}\" but got "
+                                f"\"{result[:80]}\"",
+                        salience=0.7 + 0.2 * surprise,
+                        data={"surprise": surprise,
+                               "expected": ws.last_prediction, "actual": result},
+                    ))
+                    # Surprise spikes arousal directly (LC-style)
+                    ws.affect.update("prediction_error", step,
+                                      {"arousal": +0.06,
+                                        "stress": +0.03 * (surprise - 0.55)},
+                                      smoothing=0.7)
+                ws.last_prediction = None  # consumed
+
                 if self.humanize:
                     self.vta.step(ws)
+
+                # ── skill compilation (System-2 → System-1) ──
+                # Every action contributes to the skill cache: successes raise
+                # confidence (EMA), failures lower it. After enough successful
+                # repetitions of the same signature the BG can fire this skill
+                # next time without invoking the prefrontal at all.
+                percept = ws.latest(kind="percept")
+                sig = signature_from_percept(
+                    (percept.data if percept else {}) or {}, ws.interrupt)
+                self.skills.consolidate(sig, eff, args, ok, outcome=result)
 
                 self.hippocampus.consolidate(
                     ws, kind="action",

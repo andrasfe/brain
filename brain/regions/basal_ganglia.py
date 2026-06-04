@@ -1,12 +1,22 @@
-"""Basal ganglia — action gating / selection.
+"""Basal ganglia — action gating / selection, including habit firing.
 
-The prefrontal cortex *proposes*; the basal ganglia *disposes*. It approves,
-modifies, or vetoes the proposed action — the brain's go/no-go gate. A veto on a
-risky action (especially under an amygdala interrupt) forces a rethink.
+Two roles, matching the real BG:
+  1. **Direct path (habit / System-1)**: before the prefrontal speaks,
+     `propose_habit(ws)` consults the SkillStore for a cached
+     (signature → effector, args) tuple that has been successfully practiced.
+     If conditions allow (no amygdala interrupt, low recent surprise, low
+     curiosity, modest stress/fatigue or low conscientiousness), the habit
+     fires directly — no LLM call. This is how learned skills are recalled
+     under cognitive load.
+  2. **Indirect path (System-2 gate)**: `step(ws, proposal)` evaluates a
+     prefrontal-proposed action and approves / vetoes / repairs.
 """
 from __future__ import annotations
 
+from typing import Optional
+
 from ..region import Region
+from ..skills import Skill, SkillStore, signature_from_percept
 from ..workspace import Broadcast, Workspace
 
 
@@ -18,6 +28,32 @@ class BasalGanglia(Region):
         "or redundant with recent failed attempts. If you veto, say why so the "
         "prefrontal cortex can replan. Prefer 'go' when the action is reasonable."
     )
+
+    # ── direct path: habit-fire from compiled skills ─────────────────────────
+    def propose_habit(self, ws: Workspace,
+                      skills: Optional[SkillStore]) -> Optional[dict]:
+        """Return an action dict {effector, args, reasoning} fireable now,
+        or None to fall through to the prefrontal (System-2). No LLM call.
+        """
+        if skills is None:
+            return None
+        percept = ws.latest(kind="percept")
+        if percept is None:
+            return None
+        sig = signature_from_percept(percept.data or {}, ws.interrupt)
+        ws.last_habit_signature = sig
+        skill = skills.best_match(sig)
+        if skill is None:
+            return None
+        if not _habit_conditions_met(ws):
+            return None
+        return {
+            "effector": skill.effector,
+            "args": skill.args,
+            "reasoning": f"(habit, conf={skill.confidence:.2f}, uses={skill.uses})",
+            "_skill_id": skill.id,
+            "_skill_confidence": skill.confidence,
+        }
 
     def step(self, ws: Workspace, proposal: dict) -> Broadcast:
         a = ws.affect
@@ -59,3 +95,27 @@ class BasalGanglia(Region):
             content=f"{out.get('decision', 'no_go')}: {out.get('reason', '')[:140]}",
             salience=0.6, data=out,
         ))
+
+
+def _habit_conditions_met(ws: Workspace) -> bool:
+    """Psychological gating of habit-fire.
+
+    Habits dominate under cognitive load (stress, fatigue, low PFC bandwidth).
+    Novelty/surprise breaks habit (you can't autopilot through a changed
+    situation). Threats (amygdala interrupt) always force System-2."""
+    a = ws.affect
+    # 1) any active amygdala interrupt → System-2
+    if ws.interrupt:
+        return False
+    # 2) recent surprise broke the routine → System-2 for at least a cycle
+    if ws.last_surprise > 0.55:
+        return False
+    # 3) exploration mode (high curiosity, low stress) → System-2
+    if a.curiosity > 0.70 and a.stress < 0.40:
+        return False
+    # 4) habit favored under load OR low conscientiousness OR routine mood
+    load = max(a.stress, a.fatigue)
+    if load > 0.50 or a.traits.conscientiousness < 0.40:
+        return True
+    # 5) calm-baseline default: habit OK if reward tone is neutral/positive
+    return a.reward_tone >= 0.0 and a.boredom < 0.70

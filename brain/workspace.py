@@ -76,6 +76,16 @@ class Workspace:
         # one unit at a time; other regions can also append (DMN tangents,
         # amygdala intrusions) — that IS the interruption mechanism.
         self.thought_chain: list[ThoughtUnit] = []
+        # Predictive coding: the prefrontal may emit an `expected_result`
+        # for each action. After the action runs, the orchestrator computes
+        # surprise (trigram distance vs actual) and stores it here. The
+        # basal ganglia consults it to break habit-fire on the next cycle.
+        self.last_prediction: Optional[str] = None
+        self.last_surprise: float = 0.0
+        # The signature used for habit lookup last cycle (for debugging /
+        # tracing only).
+        self.last_habit_signature: Optional[str] = None
+        self.habit_fired: bool = False  # True if this cycle's action came from cache
 
     # ── posting / reading ────────────────────────────────────────────────────
     def post(self, b: Broadcast) -> Broadcast:

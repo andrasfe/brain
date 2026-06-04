@@ -81,11 +81,19 @@ loop until thought-unit.kind == "finish" or max_cycles reached:
   locus_coeruleus      → arousal gain
   default_mode         → maybe append a tangent ThoughtUnit (hijack)
   spotlight            → broadcast most salient item
+  basal_ganglia.propose_habit (SYSTEM-1, no LLM):
+      if SkillStore has a fireable habit AND psychological gate allows
+      (no interrupt, low recent surprise, cognitive load) → fire it,
+      skip the prefrontal, consolidate result, continue
   prefrontal           → produce ONE ThoughtUnit conditioned on
-                         (full chain so far, AffectState, workspace)
+                         (full chain so far, AffectState, workspace);
+                         emits expected_result for action units (predictive coding)
   if unit.kind == "action":
-    basal_ganglia      → go / no_go (mood-loosened or -tightened)
+    basal_ganglia.gate → go / no_go (mood-loosened or -tightened)
     effectors.execute  → motor result appended to chain
+    prediction error   → trigram surprise(expected, actual) →
+                         broadcast + arousal/stress spike + breaks next-cycle habit
+    skills.consolidate → (sig, effector, args, ok) → habit cache (EMA)
     vta                → reward prediction error → AffectState
   affect.decay_toward_baseline
 speak (broca, once)    → final answer voiced by mood
@@ -134,6 +142,18 @@ either recovers ("Forget the cat; …") or drifts.
   notifications, social pings, deadline pressure) which the orchestrator
   posts to the workspace as `source="world"` broadcasts.
 
+- **`brain/skills.py`** — `SkillStore` (the procedural-memory / System-1
+  substrate) + `signature_from_percept` + `prediction_surprise`.
+  Skills are `(signature, effector, args)` tuples cached in the same SQLite
+  db as episodic memory. Each successful action raises confidence (EMA),
+  each failure lowers it; a small staleness decay is applied at read time.
+  `best_match(signature)` returns the highest-confidence fireable skill
+  (uses ≥ 2 and confidence ≥ 0.55). The basal ganglia consults this BEFORE
+  the prefrontal speaks; on hit + gate-allowed, the skill fires with NO LLM
+  call — that's System-2→System-1 compilation through practice.
+  `prediction_surprise(expected, actual)` is a trigram Jaccard distance used
+  for the predictive-coding signal after every external action.
+
 - **`brain/llm.py`** — thin OpenRouter client (`LLM`). `chat()` and `chat_json()`
   with retry/backoff; `chat_json` is tolerant of code fences / surrounding prose
   via `_extract_json`.
@@ -161,12 +181,24 @@ either recovers ("Forget the cat; …") or drifts.
     + current AffectState + workspace. Mood-voiced; affect modulates
     temperature (distractibility raises it, stress narrows it). Emits a
     `ThoughtUnit` with kind ∈ {reflect, recall, appraise, tentative_plan,
-    action, finish, tangent}. Guards against invented effectors — if
-    kind=action with an effector not in the available list, it's demoted to
-    `tentative_plan` rather than dispatched.
-  - **`basal_ganglia.py`** — action gating, mood-modulated: high reward tone
-    loosens vetoes (impulsivity), high conscientiousness tightens them, high
-    agreeableness vetoes potential harm.
+    action, finish, tangent}. For action units it also emits an
+    `expected_result` (~15 words) used as the **top-down prediction** in
+    predictive coding — the orchestrator scores actual-vs-expected after the
+    action runs and surprise feeds back to LC arousal. Guards against
+    invented effectors — if kind=action with an effector not in the available
+    list, it's demoted to `tentative_plan` rather than dispatched.
+  - **`basal_ganglia.py`** — TWO roles, matching real BG circuitry:
+    - **`propose_habit(ws, skills)` (direct path, System-1)**: consulted by
+      the orchestrator *before* the prefrontal speaks. Returns a cached
+      action dict from the SkillStore if a fireable skill matches the
+      current percept signature AND `_habit_conditions_met(ws)` allows
+      (no amygdala interrupt, low recent surprise, not in exploration mode,
+      cognitive load OR low conscientiousness OR neutral baseline). On hit,
+      the action fires with NO LLM call.
+    - **`step(ws, proposal)` (indirect path, System-2)**: gates an
+      already-proposed action. Mood-modulated: high reward tone loosens
+      vetoes (impulsivity), high conscientiousness tightens, high
+      agreeableness vetoes potential harm.
   - **`broca.py`** — language production at the end; voice instructions shaped
     by current mood (clipped under stress, warmer under positive valence, blunt
     when agreeableness low). First-person.
@@ -202,6 +234,15 @@ either recovers ("Forget the cat; …") or drifts.
   directly — they read/write the blackboard. This is the GWT discipline,
   preserved even after humanization. Affect mutation by interoception/DMN/VTA/LC
   happens via `ws.affect.update(...)`, not via region-to-region calls.
+- **System-1 (habit) vs System-2 (deliberation)** are two paths through the
+  same BG region, not a separate architecture. The cached skill fires *or*
+  the prefrontal speaks — never both per cycle. Skill compilation happens
+  silently on every successful action via `skills.consolidate(...)`.
+- **Predictive coding** is a single field pair on the Workspace
+  (`last_prediction` written by the prefrontal, `last_surprise` written by
+  the orchestrator). A high `last_surprise` (a) spikes LC arousal, (b)
+  broadcasts a `prediction_error` item that competes for the spotlight, and
+  (c) breaks habit-fire on the next cycle — surprise forces System-2.
 - **Regions are defined entirely by their system prompt + `step()`**. To
   change behavior, change the prompt or the step logic, not the workspace.
   The single legitimate way to humanize a region's behavior is to thread

@@ -231,6 +231,90 @@ class StubbedBrainEndToEnd(unittest.TestCase):
             self.assertTrue(answer)
 
 
+class SkillStoreTests(unittest.TestCase):
+    """Skill compilation, lookup, and the habit-fire psychological gate."""
+
+    def test_signature_stable_for_similar_percepts(self):
+        from brain.skills import signature_from_percept
+        a = signature_from_percept(
+            {"goal": "Write the primes script", "entities": ["python", "primes"]},
+            None)
+        b = signature_from_percept(
+            {"goal": "write THE primes script", "entities": ["Python", "Primes"]},
+            None)
+        self.assertEqual(a, b)
+
+    def test_consolidate_then_fire(self):
+        from brain.skills import SkillStore
+        tmp = Path(tempfile.mkdtemp()) / "s.sqlite"
+        s = SkillStore(tmp)
+        sig = "e=primes,python;g=script,write;N"
+        # one successful use → not yet fireable
+        s.consolidate(sig, "write_file",
+                      {"path": "primes.py", "content": "..."}, ok=True)
+        self.assertIsNone(s.best_match(sig))
+        # second success → confidence above threshold, uses ≥ 2 → fireable
+        skill = s.consolidate(sig, "write_file",
+                              {"path": "primes.py", "content": "..."}, ok=True)
+        self.assertTrue(skill.is_fireable())
+        best = s.best_match(sig)
+        self.assertIsNotNone(best)
+        self.assertEqual(best.effector, "write_file")
+        s.close()
+
+    def test_failure_lowers_confidence(self):
+        from brain.skills import SkillStore
+        tmp = Path(tempfile.mkdtemp()) / "s.sqlite"
+        s = SkillStore(tmp)
+        sig = "x"
+        s.consolidate(sig, "shell", {"command": "ls"}, ok=True)
+        s.consolidate(sig, "shell", {"command": "ls"}, ok=True)
+        s.consolidate(sig, "shell", {"command": "ls"}, ok=True)
+        good = s.best_match(sig)
+        self.assertIsNotNone(good)
+        c_before = good.confidence
+        # punish twice (e.g. a stale-habit miss)
+        s.punish(good.id)
+        s.punish(good.id)
+        after = s.best_match(sig)
+        self.assertLess(after.confidence if after else 0.0, c_before)
+        s.close()
+
+    def test_habit_gate_blocked_by_interrupt(self):
+        from brain.regions.basal_ganglia import _habit_conditions_met
+        ws = Workspace(task="t")
+        ws.affect.stress = 0.9   # would normally favor habit
+        ws.interrupt = "fire!"
+        self.assertFalse(_habit_conditions_met(ws))
+
+    def test_habit_gate_blocked_by_surprise(self):
+        from brain.regions.basal_ganglia import _habit_conditions_met
+        ws = Workspace(task="t")
+        ws.affect.stress = 0.9   # cognitive load
+        ws.last_surprise = 0.8   # but just had a big surprise
+        self.assertFalse(_habit_conditions_met(ws))
+
+    def test_habit_gate_favors_load(self):
+        from brain.regions.basal_ganglia import _habit_conditions_met
+        ws = Workspace(task="t")
+        ws.affect.stress = 0.75
+        ws.affect.curiosity = 0.30
+        self.assertTrue(_habit_conditions_met(ws))
+
+
+class PredictiveCodingTests(unittest.TestCase):
+    def test_surprise_score(self):
+        from brain.skills import prediction_surprise
+        # identical → 0
+        self.assertEqual(prediction_surprise("the cat sat", "the cat sat"), 0.0)
+        # no prediction → 0 (no signal)
+        self.assertEqual(prediction_surprise("", "anything"), 0.0)
+        # disjoint trigrams → near 1
+        self.assertGreater(
+            prediction_surprise("apples grow on trees",
+                                "submarines navigate cold oceans"), 0.9)
+
+
 class StreamOfThoughtTests(unittest.TestCase):
     """The chain is built autoregressively; DMN can append a tangent unit
     that the next prefrontal step sees and is marked as 'interrupted'."""

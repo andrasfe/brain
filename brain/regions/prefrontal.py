@@ -94,6 +94,9 @@ class Prefrontal(Region):
             '{"content": "the thought, first person", '
             '"kind": "reflect|recall|appraise|tentative_plan|action|finish|tangent", '
             '"args": {} (only if kind=action or finish), '
+            '"expected_result": "if kind=action, ~15 words predicting what the '
+            'effector will return — used for surprise / predictive-coding signal. '
+            'Omit for non-action kinds.", '
             '"confidence": 0.0-1.0}'
         )
         out = self._chat_json(prompt, temperature=temp, max_tokens=600)
@@ -123,6 +126,14 @@ class Prefrontal(Region):
             affect_snapshot=a.mood_label,
             interrupted=bool(recent_intrusion),
         )
+        # Stash the predicted action result so the orchestrator can compute
+        # surprise after execution (predictive coding signal).
+        if kind == "action":
+            expected = (out.get("expected_result") or "").strip()
+            if expected:
+                ws.last_prediction = expected
+            else:
+                ws.last_prediction = None
         ws.thought_chain.append(unit)
 
         # Mirror onto the broadcast feed so the spotlight machinery still sees it.
