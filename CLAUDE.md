@@ -65,6 +65,11 @@ python3 -m brain.daemon
 python3 -m brain.daemon --tick-seconds 0.5 --idle-rate 0.05
 python3 -m brain.daemon --initial-task "plan dinner" --max-ticks 200
 
+# daemon with continuous input streams + coalesced wake
+python3 -m brain.daemon --webhook-port 8765 --tail-file ~/Library/Logs/mail.log \
+  --coalesce-window 30 --coalesce-max 6
+# then from anywhere:  curl -X POST http://localhost:8765/dm -d '{"content":"hi"}'
+
 # offline tests (no network, no API key)
 python3 -m unittest tests.test_humanize_offline -v
 
@@ -178,10 +183,43 @@ either recovers ("Forget the cat; …") or drifts.
   spontaneous thoughts (gated by curiosity − stress). NREM dispatches the
   forgetter / skill_pruner / mood_regulator / consolidator agents per bout.
   REM dispatches the dreamer. Sleep cycles alternate NREM/REM with REM
-  share growing late, mirroring real biology. CLI:
-  `python -m brain.daemon`; stdin lines enqueue tasks while the loop runs;
-  Ctrl-C exits cleanly. Time-triggered prospective items rouse the brain
-  from sleep via the scheduler agent.
+  share growing late, mirroring real biology.
+
+  **Streaming inputs**: every tick polls all registered `InputAdapter`s
+  (stdin / webhook / file_tail / your own), runs each item through the
+  deterministic `SalienceClassifier` (no LLM), and routes by salience:
+  below `ambient_threshold` → low-salience episodic memory (silent
+  recall later), `ambient_threshold..direct_threshold` → ambient buffer,
+  above `direct_threshold` → direct buffer.
+
+  **Coalesced wake**: instead of one cognitive cycle per arriving item,
+  the daemon accumulates the buffers over `coalesce_window_seconds` (or
+  until `coalesce_max_items` reached, or a `coalesce_force_salience`
+  item arrives) and processes them as ONE `Brain.run` with a composed
+  task text ("you have N new direct items, top ambient: A B C"). Cuts
+  cycle count by 5-10× on bursty streams — essential when every LLM
+  call costs seconds.
+
+  CLI: `python -m brain.daemon [--no-stdin] [--webhook-port 8765]
+  [--tail-file /var/log/x.log]` etc. Ctrl-C exits cleanly. Time-triggered
+  prospective items rouse the brain from sleep via the scheduler agent.
+
+- **`brain/inputs/`** — continuous-stream plumbing.
+  - `base.py`: `InputAdapter` abstract base + `StreamItem` dataclass
+    (source, kind, content, channel, salience, ts, sender, metadata).
+  - `classifier.py`: `SalienceClassifier`, deterministic, no LLM. Blends
+    channel prior + sender prior + keyword rules + embedding similarity
+    to past high-salience items (one k-NN call) + affect modulation
+    (stress lifts floor, fatigue lowers responsiveness, curiosity bumps
+    novelty). `route(item)` returns `'drop' | 'ambient' | 'direct'`.
+  - `stdin_adapter.py`: non-blocking stdin line reader (direct channel).
+  - `webhook_adapter.py`: tiny built-in `http.server.ThreadingHTTPServer`
+    on a background thread; POST handler queues items. Channel / kind /
+    sender configurable per request via query string, headers, or
+    path-to-name mapping. Use to plumb any local script (mail-watcher,
+    file-watcher, Slack relay) into the brain.
+  - `file_tail_adapter.py`: tail -f one or more files; new lines become
+    ambient items. Handles truncation/rotation by re-seeking.
 
 - **`brain/sleep/`** — sleep-only agents, each owning ONE job:
   - `dreamer.py` (REM): two lanes. (1) Samples DISTANT memory pairs (low

@@ -49,6 +49,10 @@ sys.path.insert(0, str(REPO))
 from brain import consolidator  # noqa: E402
 from brain.affect import AffectState  # noqa: E402
 from brain.config import load_config  # noqa: E402
+from brain.inputs import (  # noqa: E402
+    InputAdapter, SalienceClassifier, StdinAdapter, StreamItem,
+)
+from brain.inputs.classifier import ClassifierRules  # noqa: E402
 from brain.orchestrator import Brain  # noqa: E402
 from brain.sleep import (  # noqa: E402
     Dreamer, Forgetter, MoodRegulator, Scheduler, SkillPruner,
@@ -89,6 +93,11 @@ class BrainDaemon:
                  wake_fatigue: float = 0.25,
                  nrem_bout_ticks: int = 6,
                  rem_bout_ticks: int = 4,
+                 adapters: Optional[list[InputAdapter]] = None,
+                 classifier: Optional[SalienceClassifier] = None,
+                 coalesce_window_seconds: float = 60.0,
+                 coalesce_max_items: int = 8,
+                 coalesce_force_salience: float = 0.85,
                  log: Callable[[str], None] = print,
                  seed: Optional[int] = None):
         self.cfg = cfg
@@ -123,12 +132,55 @@ class BrainDaemon:
         self.dreamer = Dreamer(seed=seed)
         self.scheduler = Scheduler()
 
+        # Input adapters + classifier (load-shedding for continuous streams)
+        self.adapters: list[InputAdapter] = list(adapters or [])
+        if classifier is None:
+            classifier = SalienceClassifier(
+                rules=ClassifierRules(),
+                affect=self.affect,
+                memory=brain.memory,
+                embedding_backend=brain.memory.backend,
+            )
+        else:
+            # Wire the persistent affect handle so classifier sees mood
+            classifier.affect = self.affect
+            if classifier.memory is None:
+                classifier.memory = brain.memory
+        self.classifier = classifier
+
+        # Coalesced wake batching
+        self.coalesce_window_seconds = coalesce_window_seconds
+        self.coalesce_max_items = coalesce_max_items
+        self.coalesce_force_salience = coalesce_force_salience
+        self._direct_buffer: list[StreamItem] = []
+        self._ambient_buffer: list[StreamItem] = []
+        self._buffer_opened_at: Optional[float] = None
+        # Bring adapters online
+        for ad in self.adapters:
+            try:
+                ad.start()
+            except Exception as e:
+                self.log(f"[daemon] adapter {ad.name} failed to start: {e}")
+
     # ── public API ──────────────────────────────────────────────────────────
     def enqueue(self, task: str) -> None:
-        """Add a task to the input queue. Will be processed next time the
-        daemon enters WAKE (and finishes current work)."""
+        """Add a task to the input queue. Bypasses the classifier and goes
+        straight into the direct buffer at maximum salience. Use for
+        programmatic injection (tests, glue scripts)."""
         if task and task.strip():
-            self.input_q.put(task.strip())
+            self._direct_buffer.append(StreamItem(
+                source="enqueue", kind="task", content=task.strip(),
+                channel="direct", sender="programmatic",
+                salience=1.0,
+            ))
+
+    def add_adapter(self, adapter: InputAdapter) -> None:
+        try:
+            adapter.start()
+        except Exception as e:
+            self.log(f"[daemon] adapter {adapter.name} failed to start: {e}")
+            return
+        self.adapters.append(adapter)
 
     def run_forever(self, max_ticks: Optional[int] = None) -> DaemonStats:
         """Main loop. `max_ticks` is for tests / bounded runs."""
@@ -143,10 +195,53 @@ class BrainDaemon:
         except KeyboardInterrupt:
             self.log("\n[daemon] interrupted; saving and exiting")
             return self.stats
+        finally:
+            for ad in self.adapters:
+                try:
+                    ad.close()
+                except Exception:
+                    pass
 
     # ── one tick ────────────────────────────────────────────────────────────
     def tick(self) -> None:
         self.tick_n += 1
+
+        # ── poll input adapters → classify → route ─────────────────────────
+        # This is the streaming load-shedder. Every item goes through the
+        # deterministic classifier; below-threshold items are dropped (or
+        # stored as low-salience episodic for morning recall) so they never
+        # cost the LLM. Above-threshold items become broadcasts or batch
+        # into the direct buffer for coalesced wake.
+        new_items: list[StreamItem] = []
+        for ad in self.adapters:
+            try:
+                new_items.extend(ad.poll())
+            except Exception as e:
+                self.log(f"[daemon] adapter {ad.name} poll error: {e}")
+        if new_items:
+            self.classifier.classify_batch(new_items)
+            for it in new_items:
+                bucket = self.classifier.route(it)
+                if bucket == "drop":
+                    # Store as a low-salience episodic so morning recall sees it
+                    try:
+                        self.brain.memory.store(
+                            task="ambient_stream", kind=it.kind,
+                            content=it.short(160),
+                            salience=max(0.05, it.salience),
+                            mem_type="episodic",
+                            tags=[f"src:{it.source}", "below_threshold"],
+                        )
+                    except Exception:
+                        pass
+                    continue
+                if bucket == "direct":
+                    self._direct_buffer.append(it)
+                    if self._buffer_opened_at is None:
+                        self._buffer_opened_at = time.time()
+                else:
+                    self._ambient_buffer.append(it)
+
         # Advance the world (ambient stimuli, time-of-day, drives drift).
         # We do this in any state, but the effects on affect are smaller
         # during sleep (most stimuli are filtered out).
@@ -181,9 +276,15 @@ class BrainDaemon:
                     self.input_q.put(f"REMINDER: {f['content']}")
 
         # External input always wakes the brain
-        if not self.input_q.empty() and self.state != WAKE:
+        if (self._direct_buffer or not self.input_q.empty()) and self.state != WAKE:
             self.log(f"  ↑ external input arrived → WAKE")
             self._enter_state(WAKE)
+
+        # Drain any high-salience ambient items into broadcasts on the
+        # workspace at the start of any state — but only the workspace of
+        # the brain's current task (or future task). For now we just
+        # accumulate; they get folded into the next task summary by
+        # _maybe_process_coalesced_batch.
 
         # Dispatch by state
         if self.state == WAKE:
@@ -205,13 +306,17 @@ class BrainDaemon:
 
     # ── per-state ticks ─────────────────────────────────────────────────────
     def _tick_wake(self) -> None:
+        # 1. Legacy input queue (programmatic enqueue from before)
         if not self.input_q.empty():
             task = self.input_q.get()
             self.log(f"\n[wake] processing: {task[:80]}")
-            # Hand current affect state in via the brain by patching its
-            # _build_initial_affect to return the daemon's persistent affect.
             self._run_task_with_persistent_affect(task)
             self.stats.tasks_processed += 1
+            return
+
+        # 2. Coalesced-wake: drain the direct/ambient buffers as ONE task
+        if self._should_flush_buffers():
+            self._process_coalesced_batch()
             return
 
         # Idle: maybe think a spontaneous thought (rate-limited).
@@ -339,6 +444,76 @@ class BrainDaemon:
             self._sleep_bouts_remaining = (self.nrem_bout_ticks
                                            - (2 if late_night else 0))
 
+    # ── coalesced-wake batching ─────────────────────────────────────────────
+    def _should_flush_buffers(self) -> bool:
+        """Trigger a coalesced wake when: buffer is non-empty AND
+        (max items reached, OR window elapsed, OR any item has very high
+        salience that warrants immediate attention)."""
+        if not self._direct_buffer and not self._ambient_buffer:
+            return False
+        # Force on any very-high-salience item
+        if any(i.salience >= self.coalesce_force_salience
+                for i in self._direct_buffer):
+            return True
+        # Max items reached
+        if len(self._direct_buffer) >= self.coalesce_max_items:
+            return True
+        # Window elapsed
+        if self._buffer_opened_at is None:
+            return False
+        if time.time() - self._buffer_opened_at >= self.coalesce_window_seconds:
+            return True
+        return False
+
+    def _process_coalesced_batch(self) -> None:
+        """Compose a single task text from the buffered items, run Brain.run
+        once, then post any remaining ambient items as low-salience
+        episodic for later recall."""
+        direct = sorted(self._direct_buffer,
+                         key=lambda i: i.salience, reverse=True)
+        ambient = sorted(self._ambient_buffer,
+                          key=lambda i: i.salience, reverse=True)
+        if not direct and not ambient:
+            return
+        self._direct_buffer = []
+        self._ambient_buffer = []
+        self._buffer_opened_at = None
+
+        # Build the task text. Direct items get full content; ambient items
+        # get short glosses. The brain treats this as one cognitive cycle.
+        bits: list[str] = []
+        if direct:
+            bits.append(f"You have {len(direct)} new direct items:")
+            for it in direct[: self.coalesce_max_items]:
+                tag = f"[{it.source}/{it.kind} s={it.salience:.2f}]"
+                sender = f" {it.sender}:" if it.sender else ""
+                bits.append(f"  {tag}{sender} {it.short(220)}")
+        if ambient:
+            top = ambient[:5]
+            bits.append(f"\nAmbient (top {len(top)} of {len(ambient)}):")
+            for it in top:
+                bits.append(f"  [{it.source} s={it.salience:.2f}] {it.short(140)}")
+        task_text = "\n".join(bits)
+
+        self.log(f"\n[wake] coalesced batch: {len(direct)} direct + "
+                 f"{len(ambient)} ambient items")
+        self._run_task_with_persistent_affect(task_text)
+        self.stats.tasks_processed += 1
+
+        # Bury the rest of ambient (beyond the top 5) as low-sal episodic so
+        # they're still recallable later but don't keep crowding the prompt.
+        for it in ambient[5:]:
+            try:
+                self.brain.memory.store(
+                    task="ambient_stream", kind=it.kind,
+                    content=it.short(160),
+                    salience=max(0.05, it.salience * 0.6),
+                    mem_type="episodic",
+                    tags=[f"src:{it.source}", "ambient_buried"],
+                )
+            except Exception:
+                pass
+
     # ── spontaneous wake-thought (idle wandering) ──────────────────────────
     def _spontaneous_thought(self) -> None:
         """One-shot small cycle: bored mind notices something. Not a full
@@ -413,6 +588,16 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--initial-task", default=None,
                     help="enqueue a task before the loop starts")
+    ap.add_argument("--no-stdin", action="store_true",
+                    help="don't poll stdin for direct task input")
+    ap.add_argument("--webhook-port", type=int, default=None,
+                    help="enable HTTP webhook adapter on this port")
+    ap.add_argument("--tail-file", action="append", default=[],
+                    help="tail this file as an ambient stream (repeatable)")
+    ap.add_argument("--coalesce-window", type=float, default=60.0,
+                    help="seconds to accumulate items before processing")
+    ap.add_argument("--coalesce-max", type=int, default=8,
+                    help="max items to batch before forcing a wake cycle")
     args = ap.parse_args()
 
     cfg = load_config()
@@ -424,30 +609,40 @@ def main() -> int:
     brain = Brain(cfg, confirm=lambda _m: False,
                   log=lambda m: print(m, flush=True),
                   humanize=True, seed=args.seed)
+
+    # Build input adapters per CLI flags. stdin is on by default.
+    adapters: list = []
+    if not args.no_stdin:
+        adapters.append(StdinAdapter())
+    if args.webhook_port:
+        from brain.inputs import WebhookAdapter
+        adapters.append(WebhookAdapter(port=args.webhook_port))
+    if args.tail_file:
+        from brain.inputs import FileTailAdapter
+        adapters.append(FileTailAdapter(paths=args.tail_file))
+
     daemon = BrainDaemon(
         cfg, brain,
         tick_seconds=args.tick_seconds,
         world_cycle_minutes=args.world_cycle_minutes,
         idle_rate=args.idle_rate,
+        adapters=adapters,
+        coalesce_window_seconds=args.coalesce_window,
+        coalesce_max_items=args.coalesce_max,
         log=lambda m: print(m, flush=True),
         seed=args.seed,
     )
     if args.initial_task:
         daemon.enqueue(args.initial_task)
 
+    adapter_names = ", ".join(a.name for a in adapters) or "none"
     print(f"[daemon] starting in state={daemon.state} "
-          f"(tick={args.tick_seconds}s, idle_rate={args.idle_rate})\n"
-          "Type a task and hit Enter to enqueue it. Ctrl-C to exit.\n",
+          f"(tick={args.tick_seconds}s, idle_rate={args.idle_rate}, "
+          f"adapters={adapter_names}, "
+          f"coalesce={args.coalesce_window:.0f}s/{args.coalesce_max} items)\n"
+          "Type a task and hit Enter to enqueue it (if stdin adapter is on). "
+          "Ctrl-C to exit.\n",
           flush=True)
-
-    # Wrap tick with a tiny stdin poll so the daemon stays interactive.
-    original_tick = daemon.tick
-    def tick_with_stdin():
-        line = _maybe_read_stdin_line(timeout=min(0.05, daemon.tick_seconds))
-        if line:
-            daemon.enqueue(line)
-        original_tick()
-    daemon.tick = tick_with_stdin  # type: ignore
 
     try:
         stats = daemon.run_forever(max_ticks=args.max_ticks)

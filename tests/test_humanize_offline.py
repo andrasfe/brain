@@ -1252,5 +1252,207 @@ class CerebellumTests(unittest.TestCase):
         wm.close(); skills.close()
 
 
+class ClassifierAndAdapterTests(unittest.TestCase):
+    """Deterministic salience classifier + input adapters + coalesced wake."""
+
+    def test_classifier_keyword_high_lifts_salience(self):
+        from brain.inputs import StreamItem, SalienceClassifier
+        from brain.inputs.classifier import ClassifierRules
+        rules = ClassifierRules(keywords_high=["deadline", "Maria"],
+                                  keywords_low=["spam", "promo"])
+        c = SalienceClassifier(rules=rules,
+                                ambient_threshold=0.2, direct_threshold=0.6)
+        a = StreamItem(source="rss", kind="notification",
+                       content="reminder about the deadline",
+                       channel="ambient")
+        b = StreamItem(source="rss", kind="notification",
+                       content="promo offer this week", channel="ambient")
+        c.classify(a); c.classify(b)
+        self.assertGreater(a.salience, b.salience)
+
+    def test_classifier_routes_direct_vs_ambient(self):
+        from brain.inputs import StreamItem, SalienceClassifier
+        c = SalienceClassifier(ambient_threshold=0.25, direct_threshold=0.55)
+        direct = StreamItem(source="dm", kind="task",
+                             content="please help", channel="direct",
+                             sender="Sam")
+        ambient = StreamItem(source="rss", kind="notification",
+                              content="weather: cloudy", channel="ambient")
+        noisy = StreamItem(source="metrics", kind="notification",
+                            content="x", channel="ambient")
+        c.classify(direct); c.classify(ambient); c.classify(noisy)
+        self.assertEqual(c.route(direct), "direct")
+        self.assertEqual(c.route(noisy), "drop")
+        self.assertIn(c.route(ambient), ("ambient", "drop"))
+
+    def test_classifier_uses_memory_similarity_to_lift_score(self):
+        from brain.inputs import StreamItem, SalienceClassifier
+        from brain.memory import EPISODIC, Memory
+        tmp = Path(tempfile.mkdtemp()) / "m.sqlite"
+        m = Memory(tmp)
+        # Seed a high-salience past episode
+        m.store("t", "action", "father's surgery recovery progress good", 0.95,
+                mem_type=EPISODIC)
+        c = SalienceClassifier(memory=m, ambient_threshold=0.2,
+                                direct_threshold=0.55)
+        on_topic = StreamItem(source="rss", kind="notification",
+                               content="hospital surgery recovery story",
+                               channel="ambient")
+        off_topic = StreamItem(source="rss", kind="notification",
+                                content="bicycle commuting tips",
+                                channel="ambient")
+        c.classify(on_topic); c.classify(off_topic)
+        self.assertGreater(on_topic.salience, off_topic.salience)
+        m.close()
+
+    def test_classifier_affect_modulation(self):
+        from brain.inputs import StreamItem, SalienceClassifier
+        from brain.affect import AffectState
+        item = StreamItem(source="webhook", kind="notification",
+                           content="a thing happened", channel="ambient")
+        calm = AffectState(); calm.stress = 0.1
+        stressed = AffectState(); stressed.stress = 0.9
+        c1 = SalienceClassifier(affect=calm)
+        c2 = SalienceClassifier(affect=stressed)
+        from copy import copy
+        a1 = copy(item); a2 = copy(item)
+        c1.classify(a1); c2.classify(a2)
+        # Stressed brain notices more
+        self.assertGreater(a2.salience, a1.salience)
+
+    def test_file_tail_adapter_picks_up_new_lines(self):
+        from brain.inputs import FileTailAdapter
+        tmp = Path(tempfile.mkdtemp())
+        log = tmp / "events.log"
+        log.write_text("preamble line\n")
+        ad = FileTailAdapter(paths=[log], start_at_end=True,
+                              source_name="evlog")
+        ad.start()
+        # No items yet — we started at EOF
+        self.assertEqual(ad.poll(), [])
+        # Append new lines
+        with open(log, "a") as fh:
+            fh.write("alpha event\nbeta event\n\n")
+        items = ad.poll()
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[0].content, "alpha event")
+        self.assertEqual(items[1].content, "beta event")
+        # Second poll: empty (offset advanced)
+        self.assertEqual(ad.poll(), [])
+        ad.close()
+
+    def test_webhook_adapter_receives_post(self):
+        import json
+        import socket
+        import urllib.request
+        from brain.inputs import WebhookAdapter
+        # Pick a free ephemeral port
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        ad = WebhookAdapter(port=port)
+        ad.start()
+        try:
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/test?channel=direct&sender=Sam",
+                data=json.dumps({"content": "ping"}).encode("utf-8"),
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            urllib.request.urlopen(req, timeout=2.0).read()
+        finally:
+            # tiny wait for the handler thread to enqueue
+            import time as _t; _t.sleep(0.05)
+            items = ad.poll()
+            ad.close()
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].content, "ping")
+        self.assertEqual(items[0].channel, "direct")
+        self.assertEqual(items[0].sender, "Sam")
+
+    def test_daemon_coalesces_burst_into_one_task(self):
+        """Six adapter items arrive in a single tick; the daemon batches
+        them into ONE Brain.run call, not six."""
+        from unittest.mock import MagicMock, patch
+        from brain.config import Config
+        from brain.daemon import BrainDaemon, WAKE
+        from brain.inputs import InputAdapter, StreamItem, SalienceClassifier
+        from brain.orchestrator import Brain
+
+        class _Burst(InputAdapter):
+            name = "burst"; default_channel = "direct"
+            def __init__(self, items):
+                self._items = list(items); self._fired = False
+            def poll(self):
+                if self._fired: return []
+                self._fired = True
+                return self._items
+
+        tmp = Path(tempfile.mkdtemp())
+        cfg = Config(
+            raw={"persona_path": str(REPO / "personas" / "alex.yaml"),
+                  "scenario": "neutral", "humanize": True},
+            api_key="fake", base_url="http://fake",
+            models={"reflex": "fake", "executive": "fake"},
+            timeout_seconds=10, max_retries=0,
+            sandbox_dir=tmp, db_path=tmp / "mem.sqlite",
+            loop={"max_cycles": 1, "attention_decay": 0.8},
+            memory={"db_path": str(tmp / "mem.sqlite"), "retrieve_k": 3,
+                     "embedding_backend": "tfidf"},
+            effectors={"filesystem": {"enabled": False},
+                        "shell": {"enabled": False}, "web": {"enabled": False}},
+            regions={k: "reflex" for k in
+                      ["sensory_cortex","amygdala","basal_ganglia","hippocampus",
+                       "prefrontal","broca","interoception","default_mode",
+                       "locus_coeruleus","vta","cerebellum"]},
+        )
+
+        items = [StreamItem(source="burst", kind="task",
+                             content=f"item {i}", channel="direct",
+                             sender="user", salience=0.7)
+                 for i in range(6)]
+        burst = _Burst(items)
+
+        with patch("brain.orchestrator.LLM") as MockLLM:
+            llm = MagicMock()
+            llm.chat_json.return_value = {
+                "goal": "x", "entities": [], "constraints": [],
+                "success_criterion": "done",
+                "content": "OK", "kind": "finish",
+                "args": {"answer": "ok"}, "confidence": 0.9,
+                "decision": "go", "reason": "fine",
+            }
+            llm.chat.return_value = "ok"
+            llm.close = MagicMock()
+            MockLLM.return_value = llm
+
+            brain = Brain(cfg, confirm=lambda _m: True, log=lambda _m: None,
+                          humanize=True, seed=0)
+            # Spy on Brain.run to count invocations + see the task text
+            run_calls: list[str] = []
+            original_run = brain.run
+            def counted_run(t):
+                run_calls.append(t)
+                return original_run(t)
+            brain.run = counted_run  # type: ignore
+            d = BrainDaemon(
+                cfg, brain, tick_seconds=0.0, idle_rate=0.0,
+                adapters=[burst],
+                coalesce_window_seconds=0.0,   # flush immediately
+                coalesce_max_items=10,
+                log=lambda _m: None, seed=0,
+            )
+            d.tick()  # adapter poll → buffer fills → flush on next wake tick
+            d.tick()  # process coalesced batch
+            brain.close()
+
+        # Exactly ONE Brain.run call, containing all 6 items in its prompt
+        self.assertEqual(len(run_calls), 1)
+        composed = run_calls[0]
+        self.assertIn("6 new direct items", composed)
+        self.assertIn("item 0", composed)
+        self.assertIn("item 5", composed)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
