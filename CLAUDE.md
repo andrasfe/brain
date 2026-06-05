@@ -32,10 +32,51 @@ TODO.md for where we match and don't.
 
 ## Connectivity
 
-Credentials are loaded from `~/specter/.env` (key `OPENROUTER_API_KEY`). The
-provider is OpenRouter. Models are configured per tier in `config.yaml`. The
-`.env` also carries `LLM_PROVIDER=openrouter` and `LLM_MODEL` (a fast reflex
-model). Nothing secret is stored in this repo.
+The LLM client (`brain/llm.py`) speaks the OpenAI-compatible Chat Completions
+shape and works against any matching endpoint. The active provider profile is
+selected by `openrouter.provider` in `config.yaml`:
+
+  - `openrouter` — remote, requires `OPENROUTER_API_KEY` (loaded from
+    `~/specter/.env` or the process env)
+  - `lmstudio` — `http://localhost:1234/v1`, no auth
+  - `ollama` — `http://localhost:11434/v1`, no auth
+  - `vllm`, `llamacpp`, `custom` — see `brain/config.py`
+
+The default `config.yaml` shipped on `main` targets **LM Studio** with three
+loaded models: `nvidia/nemotron-3-nano-omni` (reflex),
+`qwen3.6-35b-a3b-uncensored-genesis-v2-apex-mtp` (executive), and
+`text-embedding-embeddinggemma-300m-qat` (embeddings). The same
+`OpenRouterBackend` embeddings client works against LM Studio (the name is
+historical — it's just an OpenAI-compatible HTTP client). Nothing secret is
+stored in this repo.
+
+### Reasoning-model handling
+
+Several local models (Nemotron, qwen3 a3b, DeepSeek-R1, …) emit
+chain-of-thought in `message.reasoning_content` and leave `message.content`
+empty until the chain finishes. `brain/llm.py` handles this:
+
+  - `chat()` prefers `content`; falls back to `reasoning_content`.
+  - `chat_json()` retries ONCE with 3× `max_tokens`, lowered temperature, and
+    a stricter system directive when the first response fails to parse —
+    catches the case where the model exhausted budget mid-reasoning.
+  - The PFC's content-fallback pulls the last clean sentence from `_raw`
+    when the model emitted valid JSON with a blank `content` field.
+
+Effector validation is defense-in-depth across THREE layers because reasoning
+models love to "repair" effectors into free-form descriptions:
+
+  1. **Prefrontal `_resolve_effector`**: tolerates several JSON shapes
+     (top-level `effector`, nested `args.effector`, `args.name`,
+     `args.verb`, `args.action`, or bare-string `args`). Demotes
+     `kind=action` to `tentative_plan` when the resolved verb isn't in
+     the available list.
+  2. **Basal ganglia gate prompt**: explicit "never a free-form phrase like
+     'go for a walk'" instruction.
+  3. **Orchestrator final check**: after BG repair, if the chosen effector
+     isn't in `Effectors.available()`, downgrade to `think` with the
+     intended verb captured in the note. The bogus dispatch never reaches
+     `Effectors.execute`.
 
 ## Commands
 
@@ -90,28 +131,41 @@ perceive (sensory cortex, once)
 loop until thought-unit.kind == "finish" or max_cycles reached:
   world.tick           → ambient stimuli (rate-limited)
   interoception        → body → affect
-  hippocampus.recall   → mood-congruent episodes (rate-limited)
+  hippocampus.recall   → mood-congruent semantic + episodic + priors,
+                          plus prospective trigger matches
   amygdala             → valence/stress writes, maybe interrupt
   locus_coeruleus      → arousal gain
   default_mode         → maybe append a tangent ThoughtUnit (hijack)
   spotlight            → broadcast most salient item
   basal_ganglia.propose_habit (SYSTEM-1, no LLM):
       if SkillStore has a fireable habit AND psychological gate allows
-      (no interrupt, low recent surprise, cognitive load) → fire it,
+      (no interrupt, low recent surprise, cognitive load) AND the
+      cerebellum's k-NN forward model doesn't predict failure → fire it,
       skip the prefrontal, consolidate result, continue
   prefrontal           → produce ONE ThoughtUnit conditioned on
-                         (full chain so far, AffectState, workspace);
-                         emits expected_result for action units (predictive coding)
+                         (full chain, AffectState, workspace, world-model peek);
+                         emits expected_result for action units
+                         (predictive coding signal)
   if unit.kind == "action":
     basal_ganglia.gate → go / no_go (mood-loosened or -tightened)
+    orchestrator       → validate effector ∈ available() (defense-in-depth);
+                         downgrade to `think` if BG repaired it bogus
     effectors.execute  → motor result appended to chain
     prediction error   → trigram surprise(expected, actual) →
                          broadcast + arousal/stress spike + breaks next-cycle habit
+    world_model.observe → (state, action, outcome) into latent-space k-NN
     skills.consolidate → (sig, effector, args, ok) → habit cache (EMA)
     vta                → reward prediction error → AffectState
   affect.decay_toward_baseline
-speak (broca, once)    → final answer voiced by mood
+speak (broca, ALWAYS)  → uses chat_json with {"answer": str} so reasoning
+                         models can't leak their chain-of-thought; mood-colored
+end-of-task consolidator → distill recurring episodic patterns to semantic facts
 ```
+
+**Broca always runs.** The PFC's `kind=finish` with `args.answer` is treated as
+a commitment hint visible to Broca via the rendered thought chain, not as the
+user-facing answer. Broca is the language-production region; PFC commits, Broca
+expresses.
 
 `max_cycles` is reinterpreted as the cap on chain length (analogue of max
 generated tokens). With this loop, DMN tangents and amygdala intrusions show
@@ -340,9 +394,13 @@ either recovers ("Forget the cat; …") or drifts.
     available to the prefrontal as a no-LLM `expected_result` default.
     This is the brain's load-bearing fast path for streaming / local-LLM
     deployments where every LLM call costs seconds.
-  - **`broca.py`** — language production at the end; voice instructions shaped
-    by current mood (clipped under stress, warmer under positive valence, blunt
-    when agreeableness low). First-person.
+  - **`broca.py`** — language production. ALWAYS runs at end of task. Uses
+    `chat_json` with `{"answer": str}` schema so reasoning-model outputs are
+    constrained to one structured field — no leaked chain-of-thought. Voice
+    instructions shaped by current mood (clipped under stress, warmer under
+    positive valence, blunt when agreeableness low). First-person.
+    `_extract_final_answer` is a fallback that pulls the last clean paragraph
+    from a reasoning monologue when JSON parse fails entirely.
   - **`interoception.py`** — INSULA, deterministic. Reads body state (hunger,
     fatigue, boredom) and writes affect deltas. Hunger drains valence; fatigue
     drops arousal; boredom tugs valence down.
@@ -521,7 +579,28 @@ the DMN-hijack-as-intrusion mechanism (verifies the next prefrontal prompt
 sees the tangent in its thought chain context), and a full one-cycle
 stubbed-LLM brain run.
 
-## Status / results so far
+## Status / results
+
+### Live-tested local stack
+
+The default `config.yaml` is wired for LM Studio on macOS with three models
+loaded concurrently:
+
+  - reflex: `nvidia/nemotron-3-nano-omni`
+  - executive: `qwen3.6-35b-a3b-uncensored-genesis-v2-apex-mtp` (MoE, ~3B
+    active per token → ~50 tok/s on M4)
+  - embeddings: `text-embedding-embeddinggemma-300m-qat` (768-dim)
+
+Verified end-to-end: `python run.py "<deliberative prompt>"` produces clean
+first-person mood-colored Broca answers with persona-driven variation across
+runs (same prompt picks different options based on affect/curiosity state).
+The world-model + cerebellum + consolidator + embeddings all light up
+automatically. Per-task latency on M4: 30s–3min depending on chain length.
+
+68/68 offline tests pass without network or API key:
+`python -m unittest tests.test_humanize_offline -v`.
+
+
 
 The app is built and working end-to-end. A live demo (writing+running a
 `primes.py`) succeeded against OpenRouter using qwen3.7-plus (executive) +
