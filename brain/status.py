@@ -176,7 +176,7 @@ def render_html(snap: dict) -> str:
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
-def _serve(cfg, port: int) -> None:
+def _serve(cfg, port: int, host: str = "127.0.0.1") -> None:
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     class H(BaseHTTPRequestHandler):
@@ -197,8 +197,10 @@ def _serve(cfg, port: int) -> None:
             self.end_headers()
             self.wfile.write(body)
 
-    srv = ThreadingHTTPServer(("127.0.0.1", port), H)
-    print(f"brain status dashboard → http://localhost:{port}  (Ctrl-C to stop)")
+    srv = ThreadingHTTPServer((host, port), H)
+    where = "all interfaces (LAN)" if host in ("0.0.0.0", "::") else host
+    print(f"brain status dashboard → http://{host}:{port}  "
+          f"(bound to {where}; Ctrl-C to stop)")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
@@ -216,11 +218,15 @@ def main() -> int:
     ap.add_argument("--json", action="store_true", help="print raw JSON")
     ap.add_argument("--serve", type=int, metavar="PORT",
                     help="serve an auto-refreshing web dashboard on PORT")
+    ap.add_argument("--host", default="127.0.0.1",
+                    help="bind address; use 0.0.0.0 for LAN/WiFi access "
+                         "(default localhost-only). The dashboard shows activity "
+                         "descriptions, so only expose on trusted networks.")
     ap.add_argument("--config", default=None)
     args = ap.parse_args()
     cfg = load_config(args.config)
     if args.serve:
-        _serve(cfg, args.serve)
+        _serve(cfg, args.serve, args.host)
         return 0
     snap = gather_status(cfg)
     print(json.dumps(snap, default=str, indent=2) if args.json else render_text(snap))
