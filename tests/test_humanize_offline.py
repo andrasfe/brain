@@ -1806,5 +1806,172 @@ class EmbodimentIntegrationTests(unittest.TestCase):
             brain.close()
 
 
+class ForwardModelTests(unittest.TestCase):
+    """The learned forward model (numpy MLP) and its sleep-time trainer."""
+
+    def setUp(self):
+        try:
+            import numpy  # noqa: F401
+        except ImportError:
+            self.skipTest("numpy not installed (optional forward-model dep)")
+
+    def test_mlp_learns_success_pattern(self):
+        import numpy as np
+        from brain.forward_model import ForwardModel
+        rng = np.random.RandomState(0)
+        emb = 6
+        # Learnable rule: success iff the first state dim > 0 (action irrelevant).
+        N = 240
+        S = rng.randn(N, emb).astype(np.float32)
+        A = rng.randn(N, emb).astype(np.float32)
+        X = np.concatenate([S, A], axis=1)
+        ok = (S[:, 0] > 0).astype(np.float32)
+        Y = S + 0.1 * A   # arbitrary smooth outcome target
+        m = ForwardModel(emb_dim=emb, hidden=32, seed=1)
+        m.fit(X, Y, ok, epochs=200, lr=5e-3, seed=1)
+        # accuracy on the training rule should be well above chance
+        correct = 0
+        for i in range(N):
+            _, p = m.predict(S[i], A[i])
+            correct += int((p >= 0.5) == bool(ok[i]))
+        acc = correct / N
+        self.assertGreater(acc, 0.85)
+
+    def test_save_load_roundtrip(self):
+        import numpy as np
+        from brain.forward_model import ForwardModel
+        m = ForwardModel(emb_dim=4, hidden=8, seed=2)
+        X = np.random.RandomState(0).randn(40, 8).astype(np.float32)
+        Y = np.random.RandomState(1).randn(40, 4).astype(np.float32)
+        ok = (np.arange(40) % 2).astype(np.float32)
+        m.fit(X, Y, ok, epochs=20)
+        s = np.random.RandomState(3).randn(4).astype(np.float32)
+        a = np.random.RandomState(4).randn(4).astype(np.float32)
+        before = m.predict(s, a)
+        path = Path(tempfile.mkdtemp()) / "fm.npz"
+        m.save(path)
+        m2 = ForwardModel.load(path)
+        self.assertIsNotNone(m2)
+        after = m2.predict(s, a)
+        self.assertAlmostEqual(before[1], after[1], places=5)
+
+    def test_load_missing_returns_none(self):
+        from brain.forward_model import ForwardModel
+        self.assertIsNone(ForwardModel.load(Path(tempfile.mkdtemp()) / "nope.npz"))
+
+
+class _DenseBackendStub:
+    """Deterministic dense embedding backend for forward-model tests:
+    embeds text -> fixed-dim vector from a hash. persistent + dim set."""
+    name = "stub-dense"
+    persistent = True
+    dim = 8
+
+    def encode_one(self, text):
+        import struct
+        import hashlib
+        h = hashlib.sha256((text or "").encode()).digest()
+        vals = [((h[i] / 255.0) * 2 - 1) for i in range(self.dim)]
+        return struct.pack(f"<I{self.dim}f", self.dim, *vals)
+
+    def from_bytes(self, blob):
+        import struct
+        n = struct.unpack("<I", blob[:4])[0]
+        return list(struct.unpack(f"<{n}f", blob[4:4 + 4 * n]))
+
+
+class ForwardModelTrainerTests(unittest.TestCase):
+    def setUp(self):
+        try:
+            import numpy  # noqa: F401
+        except ImportError:
+            self.skipTest("numpy not installed")
+
+    def _world_model_with_triples(self, n=60):
+        from brain.world_model import WorldModelStore
+        tmp = Path(tempfile.mkdtemp()) / "wm.sqlite"
+        wm = WorldModelStore(tmp, backend=_DenseBackendStub())
+        for i in range(n):
+            ok = (i % 2 == 0)
+            wm.observe(state_text=f"goal=task{i%5}; mood=neutral",
+                       action_text=f"shell(command=cmd{i%3})",
+                       outcome_text=("ok done" if ok else "error failed"),
+                       ok=ok)
+        return wm
+
+    def test_trainer_trains_and_saves(self):
+        from brain.sleep import ForwardModelTrainer
+        from brain.memory import Memory
+        wm = self._world_model_with_triples(60)
+        tmp = Path(tempfile.mkdtemp())
+        mem = Memory(tmp / "m.sqlite", backend=_DenseBackendStub())
+        ckpt = tmp / "fm.npz"
+        stats = ForwardModelTrainer(epochs=50, min_rows=20).run(
+            mem, wm, checkpoint=ckpt, log=lambda _m: None)
+        self.assertTrue(stats["trained"])
+        self.assertTrue(ckpt.exists())
+        mem.close(); wm.close()
+
+    def test_trainer_noops_on_nondense_backend(self):
+        from brain.sleep import ForwardModelTrainer
+        from brain.memory import Memory
+        from brain.embeddings import TfidfBackend
+        wm = self._world_model_with_triples(60)
+        tmp = Path(tempfile.mkdtemp())
+        # Memory with TF-IDF (non-dense) → trainer must skip
+        mem = Memory(tmp / "m.sqlite", backend=TfidfBackend())
+        stats = ForwardModelTrainer(min_rows=20).run(mem, wm, log=lambda _m: None)
+        self.assertFalse(stats["trained"])
+        self.assertEqual(stats["reason"], "non-dense backend")
+        mem.close(); wm.close()
+
+    def test_trainer_noops_on_insufficient_data(self):
+        from brain.sleep import ForwardModelTrainer
+        from brain.memory import Memory
+        wm = self._world_model_with_triples(5)
+        tmp = Path(tempfile.mkdtemp())
+        mem = Memory(tmp / "m.sqlite", backend=_DenseBackendStub())
+        stats = ForwardModelTrainer(min_rows=40).run(mem, wm, log=lambda _m: None)
+        self.assertFalse(stats["trained"])
+        wm.close(); mem.close()
+
+    def test_cerebellum_uses_learned_ok_prob(self):
+        """A forward model that always predicts failure should flip the
+        cerebellum's predicted_ok to False even when k-NN neighbours succeeded."""
+        import numpy as np
+        from brain.config import Config
+        from brain.regions.cerebellum import Cerebellum
+        from brain.world_model import WorldModelStore
+
+        backend = _DenseBackendStub()
+        tmp = Path(tempfile.mkdtemp())
+        wm = WorldModelStore(tmp / "wm.sqlite", backend=backend)
+        # all-success neighbours → k-NN would vote ok=True
+        for i in range(6):
+            wm.observe("goal=clean; mood=neutral", "shell(command=rm)",
+                       "ok removed", ok=True)
+
+        class _AlwaysFail:
+            def predict(self, s, a):
+                return (np.zeros(backend.dim, dtype=np.float32), 0.02)
+
+        cfg = Config(raw={}, api_key="", base_url="http://x", require_auth=False,
+                     extra_headers={}, models={"reflex": "x", "executive": "y"},
+                     timeout_seconds=10, max_retries=0,
+                     sandbox_dir=tmp, db_path=tmp / "m.sqlite",
+                     loop={}, memory={}, effectors={}, regions={})
+        cb = Cerebellum(cfg, llm=None, world_model=wm,
+                        forward_model=_AlwaysFail(), embedding_backend=backend)
+        ws = Workspace(task="clean")
+        from brain.workspace import Broadcast
+        ws.post(Broadcast(source="sensory_cortex", kind="percept",
+                          content="goal=clean", salience=0.9,
+                          data={"goal": "clean", "entities": []}))
+        pred = cb.quick_predict(ws, "shell", {"command": "rm"})
+        self.assertFalse(pred.predicted_ok)        # learned model overrode k-NN
+        self.assertGreater(pred.confidence, 0.5)   # 0.02 → high certainty of failure
+        wm.close()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

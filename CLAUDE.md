@@ -101,6 +101,9 @@ python3 -m eval.stream_demo                      # show chain unfolding per scen
 python3 -m brain.consolidator --n 200 --max-facts 10
 python3 -m brain.consolidator --dry-run          # cluster + tag, no LLM
 
+# train the learned forward model (JEPA-lite) on world-model triples
+python3 -m brain.sleep.forward_model_trainer --epochs 300 --min-rows 40
+
 # always-on daemon — WAKE / DROWSY / NREM / REM state machine + sleep agents
 python3 -m brain.daemon
 python3 -m brain.daemon --tick-seconds 0.5 --idle-rate 0.05
@@ -296,6 +299,22 @@ either recovers ("Forget the cat; …") or drifts.
   - `scheduler.py` (always-on): fires `kind='time'` prospective triggers
     when their absolute time has arrived. Marks them done so they don't
     re-fire. Time triggers ROUSE the brain from sleep.
+  - `forward_model_trainer.py` (NREM): trains the learned forward model
+    (`brain/forward_model.py`) on the accumulated `WorldModelStore` triples
+    — gradient descent, not accumulation. This is where the world model
+    actually *learns*. No-ops without numpy, without a dense embedding
+    backend (EmbeddingGemma / sentence-transformers — TF-IDF is sparse and
+    not trainable), or below `min_rows`. Saves a best-val checkpoint next to
+    the memory DB and refreshes the live cerebellum's model.
+
+- **`brain/forward_model.py`** — `ForwardModel`: a tiny numpy MLP (JEPA-lite).
+  Maps `[state_emb ; action_emb] → (predicted_outcome_emb, success_prob)`;
+  MSE + BCE, Adam, best-val checkpointing, input normalization, save/load.
+  The encoder (embedding backend) stays frozen; only the *predictor* is
+  learned — training the encoder itself (full DINO/JEPA) is out of scope.
+  The cerebellum loads the checkpoint and uses the learned `success_prob`
+  to gate habit-fire (overriding the k-NN majority vote), generalizing where
+  k-NN has no neighbour. numpy is an optional dependency, guarded everywhere.
 
 - **`brain/consolidator.py`** — the offline "sleep" pass. Greedy single-link
   clustering of recent episodic rows by TF-IDF cosine, then an LLM call per

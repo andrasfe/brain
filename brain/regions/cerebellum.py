@@ -58,31 +58,75 @@ class Cerebellum(Region):
 
     def __init__(self, cfg, llm, world_model: Optional[WorldModelStore] = None,
                  k: int = 3, min_top_sim: float = 0.10,
-                 confidence_floor: float = 0.30):
+                 confidence_floor: float = 0.30,
+                 forward_model=None, embedding_backend=None):
         super().__init__(cfg, llm)  # llm unused — this region never calls it
         self.world_model = world_model
         self.k = k
         self.min_top_sim = min_top_sim
         self.confidence_floor = confidence_floor
+        # Optional learned forward model (numpy MLP trained during sleep). When
+        # present (and the embedding backend is dense), its learned success
+        # probability augments the k-NN majority vote. Set/refreshed by the
+        # ForwardModelTrainer; loaded from a checkpoint at construction.
+        self.forward_model = forward_model
+        self.embedding_backend = embedding_backend
+
+    def _embed(self, text: str):
+        bk = self.embedding_backend
+        if bk is None or not getattr(bk, "persistent", False):
+            return None
+        try:
+            blob = bk.encode_one(text or "")
+            return bk.from_bytes(blob) if blob else None
+        except Exception:
+            return None
 
     # ── public: fast prediction for an action ──────────────────────────────
     def quick_predict(self, ws: Workspace, effector: str,
                        args: dict) -> CerebellumPrediction:
         """Predict the outcome of `effector(args)` in the current workspace
         state via k-NN over the WorldModelStore. No LLM call."""
-        if self.world_model is None:
+        if self.world_model is None and self.forward_model is None:
             return CerebellumPrediction("", 0.0, True, 0, 0.0)
         state_text = render_state(ws)
         action_text = render_action(effector, args or {})
-        try:
-            hits = self.world_model.predict(
-                state_text, action_text, k=self.k,
-                min_score=self.min_top_sim,
-            )
-        except Exception:
-            hits = []
+        hits = []
+        if self.world_model is not None:
+            try:
+                hits = self.world_model.predict(
+                    state_text, action_text, k=self.k,
+                    min_score=self.min_top_sim,
+                )
+            except Exception:
+                hits = []
+
+        # Learned forward model — consulted independently of k-NN, because its
+        # whole value is generalizing where k-NN has no neighbour. Returns the
+        # learned success probability when a trained model + dense embeddings
+        # are available.
+        learned_ok = None
+        learned_conf = 0.0
+        if self.forward_model is not None:
+            s = self._embed(state_text)
+            a = self._embed(action_text)
+            if s is not None and a is not None:
+                try:
+                    _, ok_prob = self.forward_model.predict(s, a)
+                    learned_ok = ok_prob >= 0.5
+                    learned_conf = round(abs(ok_prob - 0.5) * 2.0, 4)
+                except Exception:
+                    learned_ok = None
+
         if not hits:
-            return CerebellumPrediction("", 0.0, True, 0, 0.0)
+            # No retrieval neighbour. If the learned model spoke, trust it;
+            # otherwise we genuinely know nothing.
+            if learned_ok is None:
+                return CerebellumPrediction("", 0.0, True, 0, 0.0)
+            return CerebellumPrediction(
+                predicted_outcome="", confidence=learned_conf,
+                predicted_ok=bool(learned_ok), n_matches=0, top_similarity=0.0)
+
         top_sim = float(hits[0]["score"])
         # Aggregate confidence: similarity × (count factor capped at k)
         sims = [float(h["score"]) for h in hits]
@@ -90,9 +134,16 @@ class Cerebellum(Region):
         count_factor = min(1.0, len(hits) / float(self.k))
         confidence = max(self.confidence_floor * 0.0,
                           mean_sim * (0.5 + 0.5 * count_factor))
-        # Majority-vote on ok
+        # Majority-vote on ok (k-NN baseline)
         oks = sum(1 for h in hits if int(h.get("ok", 1)))
         predicted_ok = oks > (len(hits) - oks)
+
+        # Learned override: generalizes between observed triples instead of
+        # voting over the nearest few; blends confidence toward its certainty.
+        if learned_ok is not None:
+            predicted_ok = bool(learned_ok)
+            confidence = max(confidence, learned_conf)
+
         # Pick the strongest match's outcome as the predicted result text;
         # fall back to a concatenation when the top is short
         top_outcome = (hits[0].get("outcome_text") or "").strip()

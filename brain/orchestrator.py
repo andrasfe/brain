@@ -120,9 +120,14 @@ class Brain:
             self.vta = VTA(cfg, self.llm)
         # Cerebellum: deterministic, no LLM. Always built (cheap), always
         # reads the world model. Lives outside the humanize switch because
-        # it's the fast path for habit-fire decisions either way.
+        # it's the fast path for habit-fire decisions either way. Loads the
+        # sleep-trained forward model checkpoint if one exists (dense backend
+        # only) so habit-gating uses the learned success probability.
+        fwd_model = self._load_forward_model(cfg, backend)
         self.cerebellum = Cerebellum(cfg, self.llm,
-                                       world_model=self.world_model)
+                                       world_model=self.world_model,
+                                       forward_model=fwd_model,
+                                       embedding_backend=backend)
 
         # Occipital (eyes) — only when embodied.
         self.occipital = None
@@ -138,6 +143,22 @@ class Brain:
         # Seed memory with persona priors
         if persona is not None:
             self._seed_persona_memory(persona)
+
+    def _load_forward_model(self, cfg: Config, backend):
+        """Load the sleep-trained forward-model checkpoint if present and the
+        backend is dense. Returns None otherwise (cerebellum falls back to
+        pure k-NN). numpy-guarded — never a hard dependency."""
+        if not getattr(backend, "persistent", False):
+            return None
+        try:
+            from .forward_model import ForwardModel
+            from .sleep.forward_model_trainer import default_checkpoint
+        except ImportError:
+            return None
+        try:
+            return ForwardModel.load(default_checkpoint(cfg.db_path))
+        except Exception:
+            return None
 
     def _build_embodiment(self, cfg: Config, confirm):
         """Construct an afferent Embodiment from config, or return None.

@@ -55,7 +55,7 @@ from brain.inputs import (  # noqa: E402
 from brain.inputs.classifier import ClassifierRules  # noqa: E402
 from brain.orchestrator import Brain  # noqa: E402
 from brain.sleep import (  # noqa: E402
-    Dreamer, Forgetter, MoodRegulator, Scheduler, SkillPruner,
+    Dreamer, Forgetter, ForwardModelTrainer, MoodRegulator, Scheduler, SkillPruner,
 )
 from brain.workspace import Broadcast  # noqa: E402
 
@@ -79,6 +79,7 @@ class DaemonStats:
     skills_deleted: int = 0
     facts_consolidated: int = 0
     prospective_fired: int = 0
+    forward_model_trains: int = 0
 
 
 class BrainDaemon:
@@ -131,6 +132,7 @@ class BrainDaemon:
         self.mood_regulator = MoodRegulator()
         self.dreamer = Dreamer(seed=seed)
         self.scheduler = Scheduler()
+        self.forward_model_trainer = ForwardModelTrainer()
 
         # Input adapters + classifier (load-shedding for continuous streams)
         self.adapters: list[InputAdapter] = list(adapters or [])
@@ -369,6 +371,19 @@ class BrainDaemon:
                 self.stats.facts_consolidated += cs.get("facts_written", 0)
             except Exception as e:
                 self.log(f"  ⚠ consolidator failed: {type(e).__name__}: {e}")
+            # forward-model trainer: learn the world model (gradients) on the
+            # accumulated (state, action, outcome) triples; refresh the live
+            # cerebellum's model. No-ops on non-dense backends / numpy absent.
+            try:
+                fm = self.forward_model_trainer.run(
+                    self.brain.memory, self.brain.world_model,
+                    cerebellum=getattr(self.brain, "cerebellum", None),
+                    log=lambda m: self.log(f"  {m}"),
+                )
+                if fm.get("trained"):
+                    self.stats.forward_model_trains += 1
+            except Exception as e:
+                self.log(f"  ⚠ forward_model trainer failed: {type(e).__name__}: {e}")
             self.stats.sleep_bouts["nrem"] += 1
         self._sleep_bouts_remaining -= 1
 
