@@ -55,6 +55,7 @@ from brain.inputs import (  # noqa: E402
 from brain.inputs.classifier import ClassifierRules  # noqa: E402
 from brain.orchestrator import Brain  # noqa: E402
 from brain.observer import ScreenObserver  # noqa: E402
+from brain.presence import user_present  # noqa: E402
 from brain.sleep import (  # noqa: E402
     Dreamer, Forgetter, ForwardModelTrainer, MoodRegulator, ScreenPurger,
     Scheduler, SkillPruner,
@@ -143,13 +144,24 @@ class BrainDaemon:
         # local-only and drops pixels; the purger enforces retention.
         cap_cfg = cfg.capture or {}
         frames_dir = str(Path(cfg.sandbox_dir) / "frames")
+        # Presence: when the user is away (idle past this threshold — screensaver
+        # / lock / stepped-away), the brain sleeps and capture pauses. None until
+        # first sampled. presence_sleep makes presence the dominant wake/sleep
+        # trigger (over the affect/clock model) while capture is enabled.
+        self.away_threshold_s = float(cap_cfg.get("away_threshold_seconds", 300))
+        # Presence governs sleep only when capture/observation is enabled;
+        # otherwise the affect/clock model drives wake/sleep as before.
+        self.presence_sleep = bool(cap_cfg.get("enabled")) and \
+            bool(cap_cfg.get("presence_sleep", True))
+        self._user_present: Optional[bool] = None
         self.observer = None
         if cap_cfg.get("enabled") and getattr(brain, "embodiment", None) is not None:
             self.observer = ScreenObserver(
                 cfg, brain.llm, brain.memory, brain.embodiment,
-                interval_seconds=float(cap_cfg.get("interval_seconds", 30)),
+                interval_seconds=float(cap_cfg.get("interval_seconds", 60)),
                 exclude_apps=cap_cfg.get("exclude_apps"),
                 vision_model=str(cap_cfg.get("vision_model", "")),
+                change_detect=bool(cap_cfg.get("change_detect", True)),
             )
             if not self.observer.ok:
                 self.log(f"  ⚠ screen capture refused: {self.observer.reason}")
@@ -234,10 +246,15 @@ class BrainDaemon:
     def tick(self) -> None:
         self.tick_n += 1
 
-        # ── screen observation (privacy-first; rate-limited internally) ────
-        # The brain watches the user's screen continuously to learn — embeds
-        # locally and drops pixels immediately. Independent of wake/sleep.
-        if self.observer is not None:
+        # ── presence: is the user here? (idle / screensaver / lock) ─────────
+        if self.observer is not None or self.presence_sleep:
+            p = user_present(self.away_threshold_s)
+            if p is not None:
+                self._user_present = p
+
+        # ── screen observation — only while the user is present (when away
+        # there's nothing but a lock screen to see, and that's sleep time).
+        if self.observer is not None and self._user_present is not False:
             try:
                 self.observer.maybe_capture()
             except Exception as e:
@@ -363,6 +380,7 @@ class BrainDaemon:
                 },
                 "stats": self.stats.__dict__,
                 "capture": self.observer.stats() if self.observer else None,
+                "user_present": self._user_present,
             }
             write_status(self.cfg, payload)
         except Exception:
@@ -479,6 +497,27 @@ class BrainDaemon:
     # ── transitions ─────────────────────────────────────────────────────────
     def _maybe_transition(self) -> None:
         a = self.affect
+        # Presence-driven sleep (dominant when enabled): the brain sleeps when
+        # the user steps away and wakes when they return — grounding wake/sleep
+        # in reality instead of the synthetic fatigue clock.
+        if self.presence_sleep and self._user_present is not None:
+            if not self._user_present:
+                if self.state == WAKE:
+                    self._enter_state(DROWSY)
+                    return
+                if self.state == DROWSY:
+                    self._start_sleep_cycle()
+                    return
+                # already NREM/REM → let bouts alternate below
+            else:  # user present → ensure awake
+                if self.state in (DROWSY, NREM, REM):
+                    self._enter_state(WAKE)
+                    self._sleep_bouts_remaining = 0
+                    return
+                # WAKE: don't force fatigue-sleep while the user is here
+                if self.state in (NREM, REM) and self._sleep_bouts_remaining <= 0:
+                    self._advance_sleep_cycle()
+                return
         # WAKE → DROWSY
         if self.state == WAKE and a.fatigue >= self.drowsy_fatigue:
             self._enter_state(DROWSY)

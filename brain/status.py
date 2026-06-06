@@ -134,9 +134,12 @@ def render_text(snap: dict) -> str:
         lines.append(" memory : " + ", ".join(f"{k}={v}" for k, v in sorted(mt.items())))
     lines.append(f" skills : {snap.get('skills', 0)}    "
                  f"world-model rows: {snap.get('world_model', 0)}")
+    if "user_present" in d and d.get("user_present") is not None:
+        lines.append(f" present: {'yes' if d['user_present'] else 'no (away → sleeping)'}")
     cap = d.get("capture") or {}
     if cap:
         lines.append(f" capture: captured={cap.get('captured',0)} "
+                     f"deduped={cap.get('deduped',0)} "
                      f"skipped={cap.get('skipped',0)} "
                      f"privacy_ok={cap.get('privacy_ok')}"
                      + ("" if cap.get("privacy_ok", True) else f" [{cap.get('reason','')}]"))

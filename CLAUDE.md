@@ -323,7 +323,18 @@ either recovers ("Forget the cat; …") or drifts.
   refuses to run unless it can keep data local: `privacy_ok(cfg)` rejects a
   remote LLM/embedding endpoint (screen contents must never leave the machine);
   an app **exclusion list** skips sensitive apps entirely; `pause()/resume()`.
-  Driven by the daemon, rate-limited by `interval_seconds`.
+  **Adaptive cadence**: a baseline `interval_seconds` timer (default 60s), an
+  immediate trigger on frontmost-app change, and a perceptual-hash **dedup**
+  (8×8 grayscale via built-in `sips`) that skips the expensive VLM+embed when
+  the screen is ~unchanged — so the effective rate tracks real screen activity.
+
+- **`brain/presence.py`** — `idle_seconds()` (via `ioreg HIDIdleTime`, no deps)
+  + `user_present(threshold)`. The daemon uses this to ground wake/sleep in
+  reality: when you step away (idle past `away_threshold_seconds` — screensaver
+  / lock / no input) the brain sleeps (and capture pauses — nothing but a lock
+  screen to see), which is exactly when heavy NREM/REM work runs; when you
+  return it wakes. `presence_sleep` makes this the dominant trigger over the
+  affect/clock model while capture is enabled.
 
 - **`brain/status.py`** — status snapshot + UI. `gather_status(cfg)` reads the
   daemon's `status.json` (live wake/sleep state + affect, written each tick by

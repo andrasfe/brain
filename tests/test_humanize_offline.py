@@ -2095,6 +2095,99 @@ class ScreenObserverTests(unittest.TestCase):
         mem.close()
 
 
+class PresenceAndDedupTests(unittest.TestCase):
+    def _cfg(self):
+        from brain.config import Config
+        tmp = Path(tempfile.mkdtemp())
+        return Config(
+            raw={"sandbox_dir": str(tmp)}, api_key="", base_url="http://localhost:1234/v1",
+            require_auth=False, extra_headers={},
+            models={"reflex": "vm", "executive": "y"},
+            timeout_seconds=10, max_retries=0,
+            sandbox_dir=tmp, db_path=tmp / "m.sqlite",
+            loop={}, memory={"embedding_backend": "openrouter"}, effectors={},
+            regions={},
+        )
+
+    def _obs_emb(self, app="Editor"):
+        from afferent import Embodiment, FakeBackend
+        from afferent.types import Observation, Frame
+        p = Path(tempfile.mkdtemp()) / "afferent_frame_x.png"
+        p.write_bytes(b"png")
+        emb = Embodiment(FakeBackend(script=[Observation(
+            ts=0.0, frontmost_app=app, frame=Frame(id="f", ts=0.0, path=str(p)))]),
+            read_only=True)
+        return emb, str(p)
+
+    def _mem(self, cfg):
+        from brain.memory import Memory
+        from brain.embeddings import TfidfBackend
+        return Memory(cfg.db_path, backend=TfidfBackend())
+
+    def test_dedup_skips_unchanged_screen(self):
+        from brain.observer import ScreenObserver
+        from brain.memory import OBSERVATION
+        cfg = self._cfg()
+        emb, _ = self._obs_emb(app="Editor")
+        mem = self._mem(cfg)
+        llm = MagicMock(); llm.describe_image.return_value = "editing"
+        clock = [0.0]
+        ob = ScreenObserver(cfg, llm, mem, emb, interval_seconds=0,
+                            vision_model="vm", time_fn=lambda: clock[0])
+        # Force a constant fingerprint → "screen never changes"
+        ob._fingerprint = lambda path: "CONST"
+        r1 = ob.maybe_capture()           # first: captures (no prior fp)
+        self.assertTrue(r1["captured"])
+        # re-arm a frame for the next observe and advance the timer
+        emb2, _ = self._obs_emb(app="Editor")
+        ob.embodiment = emb2
+        clock[0] += 100
+        r2 = ob.maybe_capture()           # unchanged → deduped, no VLM
+        self.assertFalse(r2["captured"])
+        self.assertEqual(r2["reason"], "unchanged")
+        self.assertEqual(mem.count(OBSERVATION), 1)
+        self.assertEqual(ob.deduped, 1)
+        mem.close()
+
+    def test_app_switch_triggers_even_if_unchanged_image(self):
+        from brain.observer import ScreenObserver
+        cfg = self._cfg()
+        emb, _ = self._obs_emb(app="Editor")
+        mem = self._mem(cfg)
+        llm = MagicMock(); llm.describe_image.return_value = "x"
+        ob = ScreenObserver(cfg, llm, mem, emb, interval_seconds=99999,
+                            vision_model="vm")
+        ob._fingerprint = lambda path: "CONST"
+        ob.maybe_capture()  # captures, last_app=Editor
+        # switch app; même image fingerprint, but app changed → must capture
+        emb2, _ = self._obs_emb(app="Browser")
+        ob.embodiment = emb2
+        r = ob.maybe_capture()
+        self.assertTrue(r["captured"])
+        self.assertEqual(r["trigger"], "app_switch")
+        mem.close()
+
+    def test_presence_idle_parsing(self):
+        from unittest import mock
+        from brain import presence
+        sample = '    | "HIDIdleTime" = 4200000000\n  | "HIDIdleTime" = 9000000000\n'
+        with mock.patch("brain.presence.subprocess.run") as run:
+            run.return_value = mock.Mock(stdout=sample)
+            idle = presence.idle_seconds()
+        self.assertAlmostEqual(idle, 4.2, places=3)   # min of the two
+        with mock.patch("brain.presence.idle_seconds", return_value=600.0):
+            self.assertFalse(presence.user_present(300))
+        with mock.patch("brain.presence.idle_seconds", return_value=5.0):
+            self.assertTrue(presence.user_present(300))
+
+    def test_presence_unknown_returns_none(self):
+        from unittest import mock
+        from brain import presence
+        with mock.patch("brain.presence.subprocess.run",
+                        side_effect=OSError("no ioreg")):
+            self.assertIsNone(presence.idle_seconds())
+
+
 class ScreenPurgerTests(unittest.TestCase):
     def _mem(self):
         from brain.memory import Memory

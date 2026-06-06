@@ -24,7 +24,10 @@ Everything stays on disk in the user's home; nothing is uploaded.
 """
 from __future__ import annotations
 
+import hashlib
 import os
+import shutil
+import subprocess
 import time
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -71,9 +74,10 @@ def privacy_ok(cfg) -> "tuple[bool, str]":
 
 class ScreenObserver:
     def __init__(self, cfg, llm, memory, embodiment, *,
-                 interval_seconds: float = 30.0,
+                 interval_seconds: float = 60.0,
                  exclude_apps: Optional[list] = None,
                  vision_model: str = "",
+                 change_detect: bool = True,
                  time_fn=time.monotonic):
         self.cfg = cfg
         self.llm = llm
@@ -83,13 +87,52 @@ class ScreenObserver:
         excludes = list(exclude_apps if exclude_apps is not None else _DEFAULT_EXCLUDE)
         self._exclude = {a.lower() for a in excludes}
         self.vision_model = vision_model or cfg.models.get("reflex", "")
+        self.change_detect = change_detect
+        self._sips = shutil.which("sips")
         self._time_fn = time_fn
         self._last_capture = -1e9
+        self._last_fingerprint: Optional[str] = None
+        self._last_app: Optional[str] = None
         self._paused = False
         # Resolve privacy once; refuse if not local.
         self.ok, self.reason = privacy_ok(cfg)
         self.captured = 0
         self.skipped = 0
+        self.deduped = 0
+
+    def _frontmost(self) -> Optional[str]:
+        """Cheap frontmost-app read (no screenshot) for app-switch detection."""
+        be = getattr(self.embodiment, "backend", None)
+        if be is None or not hasattr(be, "frontmost_app"):
+            return None
+        try:
+            return be.frontmost_app()
+        except Exception:
+            return None
+
+    def _fingerprint(self, path: Optional[str]) -> Optional[str]:
+        """Perceptual hash of a screenshot: an 8×8 grayscale thumbnail (via the
+        built-in `sips`, no deps) hashed. Two ~static screens → same hash. None
+        when it can't be computed (so callers don't dedup blindly)."""
+        if not path or not self._sips or not os.path.exists(path):
+            return None
+        thumb = path + ".thumb.png"
+        try:
+            subprocess.run(
+                [self._sips, "-z", "8", "8", "-s", "format", "png",
+                 path, "--out", thumb],
+                capture_output=True, timeout=5, check=False)
+            if not os.path.exists(thumb):
+                return None
+            data = open(thumb, "rb").read()
+            return hashlib.sha1(data).hexdigest()
+        except Exception:
+            return None
+        finally:
+            try:
+                os.remove(thumb)
+            except OSError:
+                pass
 
     def pause(self) -> None:
         self._paused = True
@@ -104,31 +147,64 @@ class ScreenObserver:
         return any(x in a for x in self._exclude)
 
     def maybe_capture(self, *, force: bool = False) -> dict[str, Any]:
-        """Capture one observation if due + allowed. Returns a small status
-        dict (captured / skipped + reason). Never raises."""
+        """Capture one observation if warranted + allowed. Adaptive cadence:
+        a baseline timer, an immediate trigger when the frontmost app changes,
+        and a perceptual-hash dedup that skips the expensive VLM+embed when the
+        screen hasn't meaningfully changed. Never raises."""
         if self._paused:
             return {"captured": False, "reason": "paused"}
         if not self.ok:
             return {"captured": False, "reason": f"privacy: {self.reason}"}
         if self.embodiment is None:
             return {"captured": False, "reason": "no embodiment"}
+
         now = self._time_fn()
-        if not force and (now - self._last_capture) < self.interval_seconds:
+        app_now = self._frontmost()
+        app_switched = (app_now is not None and app_now != self._last_app)
+        due = (now - self._last_capture) >= self.interval_seconds
+        if not (force or due or app_switched):
             return {"captured": False, "reason": "not due"}
-        self._last_capture = now
+
+        # Exclusion is checked on the cheap app read first — never even
+        # screenshot a sensitive app.
+        if self._excluded(app_now):
+            self._last_app = app_now
+            self.skipped += 1
+            return {"captured": False, "reason": f"excluded app: {app_now}"}
 
         try:
             obs = self.embodiment.observe()
         except Exception as e:  # noqa: BLE001
             return {"captured": False, "reason": f"observe failed: {e}"}
 
-        app = obs.frontmost_app
+        app = obs.frontmost_app or app_now
         if self._excluded(app):
+            self._last_app = app
             self.skipped += 1
             return {"captured": False, "reason": f"excluded app: {app}"}
 
         frame = obs.frame
         path = frame.path if frame else None
+
+        # Change-dedup: if the screen is ~unchanged AND the app didn't switch,
+        # skip the VLM+embed entirely (but still drop the pixels). This is what
+        # makes the effective capture rate track real screen activity.
+        fp = self._fingerprint(path) if self.change_detect else None
+        unchanged = (fp is not None and fp == self._last_fingerprint
+                     and not app_switched)
+        self._last_capture = now
+        self._last_app = app
+        if fp is not None:
+            self._last_fingerprint = fp
+        if unchanged and not force:
+            if path:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            self.deduped += 1
+            return {"captured": False, "reason": "unchanged"}
+
         description = ""
         try:
             if path and self.vision_model:
@@ -147,8 +223,6 @@ class ScreenObserver:
                 except OSError:
                     pass
 
-        # If the backend already gave a textual render (FakeBackend in tests,
-        # or future structured backends), fold it in.
         rendered = obs.render_text(limit=12)
         content = description or rendered or f"(screen: {app or 'unknown'})"
         content = f"[{app or 'unknown'}] {content}"[:500]
@@ -160,9 +234,10 @@ class ScreenObserver:
             tags=[f"app:{(app or 'unknown').lower()}"],
         )
         self.captured += 1
-        return {"captured": True, "app": app, "content": content[:120]}
+        return {"captured": True, "app": app, "content": content[:120],
+                "trigger": "app_switch" if app_switched else "timer"}
 
     def stats(self) -> dict[str, Any]:
         return {"captured": self.captured, "skipped": self.skipped,
-                "paused": self._paused, "privacy_ok": self.ok,
-                "reason": self.reason}
+                "deduped": self.deduped, "paused": self._paused,
+                "privacy_ok": self.ok, "reason": self.reason}

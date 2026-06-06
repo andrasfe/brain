@@ -112,8 +112,15 @@ embodiment:
 # screen_purger (NREM) enforces retention. Off by default.
 capture:
   enabled: false
-  interval_seconds: 30        # min seconds between screenshots
+  interval_seconds: 60        # baseline seconds between screenshots
+  change_detect: true         # skip the VLM+embed when the screen is ~unchanged
   vision_model: ""            # blank = reflex-tier model
+  # presence: the brain sleeps when you step away (idle past the threshold —
+  # screensaver / lock / no input) and wakes when you return. Capture pauses
+  # while away (nothing but a lock screen to see) — that's when heavy NREM/REM
+  # processing runs. presence_sleep makes this the dominant wake/sleep trigger.
+  presence_sleep: true
+  away_threshold_seconds: 300
   exclude_apps:               # never captured (substring match on app name)
     - "1Password"
     - "Bitwarden"
