@@ -129,16 +129,20 @@ class Memory:
     def store(self, task: str, kind: str, content: str, salience: float = 0.5,
               mem_type: str = EPISODIC,
               affect_at_encode: Optional[dict] = None,
-              tags: Optional[Iterable[str]] = None) -> int:
+              tags: Optional[Iterable[str]] = None,
+              embedding: Optional[bytes] = None) -> int:
         if mem_type not in _VALID_TYPES:
             mem_type = EPISODIC
         affect_blob = json.dumps(affect_at_encode) if affect_at_encode else None
         tag_blob = ",".join(sorted({t.strip().lower() for t in (tags or []) if t})) or None
+        # `embedding` lets a caller supply a precomputed vector (e.g. a DINOv2
+        # image embedding for screen observations) instead of the lazy
+        # text-embedding the backend would compute.
         cur = self.conn.execute(
             "INSERT INTO episodes (ts, task, kind, content, salience, "
-            "mem_type, affect_json, tags) VALUES (?,?,?,?,?,?,?,?)",
+            "mem_type, affect_json, tags, embedding) VALUES (?,?,?,?,?,?,?,?,?)",
             (time.time(), task, kind, content, float(salience),
-             mem_type, affect_blob, tag_blob),
+             mem_type, affect_blob, tag_blob, embedding),
         )
         self.conn.commit()
         self._inserts_since_fit += 1

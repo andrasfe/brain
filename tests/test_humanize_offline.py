@@ -2147,6 +2147,64 @@ class ScreenObserverTests(unittest.TestCase):
         mem.close()
 
 
+class VisualEmbedTests(unittest.TestCase):
+    def test_make_visual_embedder_none(self):
+        from brain.vision_embed import make_visual_embedder
+        self.assertIsNone(make_visual_embedder("none"))
+
+    def test_memory_store_accepts_embedding_blob(self):
+        from brain.memory import Memory, OBSERVATION
+        from brain.embeddings import TfidfBackend, _pack_floats, _unpack_floats
+        m = Memory(Path(tempfile.mkdtemp()) / "m.sqlite", backend=TfidfBackend())
+        blob = _pack_floats([0.1, 0.2, 0.3])
+        m.store("s", "activity", "screen", 0.4, mem_type=OBSERVATION, embedding=blob)
+        row = m.conn.execute("SELECT embedding FROM episodes").fetchone()
+        self.assertIsNotNone(row["embedding"])
+        got = _unpack_floats(row["embedding"])
+        for a, b in zip(got, [0.1, 0.2, 0.3]):
+            self.assertAlmostEqual(a, b, places=5)
+        m.close()
+
+    def test_observer_stores_dinov2_blob_when_embedder_available(self):
+        from brain.observer import ScreenObserver
+        from brain.memory import Memory, OBSERVATION
+        from brain.embeddings import TfidfBackend, _unpack_floats
+        from afferent import Embodiment, FakeBackend
+        from afferent.types import Observation, Frame
+        tmp = Path(tempfile.mkdtemp())
+        p = tmp / "afferent_frame_x.png"; p.write_bytes(b"png")
+        from brain.config import Config
+        cfg = Config(raw={"sandbox_dir": str(tmp)}, api_key="",
+                     base_url="http://localhost:1234/v1", require_auth=False,
+                     extra_headers={}, models={"reflex": "vm", "executive": "y"},
+                     timeout_seconds=10, max_retries=0, sandbox_dir=tmp,
+                     db_path=tmp / "m.sqlite", loop={},
+                     memory={"embedding_backend": "openrouter"}, effectors={},
+                     regions={})
+        emb = Embodiment(FakeBackend(script=[Observation(
+            ts=0.0, frontmost_app="Editor", frame=Frame(id="f", ts=0.0, path=str(p)))]),
+            read_only=True)
+        mem = Memory(cfg.db_path, backend=TfidfBackend())
+        llm = MagicMock(); llm.describe_image.return_value = "editing"
+
+        class _FakeVisual:
+            available = True
+            def embed(self, path):
+                return [0.5, 0.6, 0.7, 0.8]
+        ob = ScreenObserver(cfg, llm, mem, emb, interval_seconds=0,
+                            vision_model="vm", visual_embedder=_FakeVisual())
+        ob._fingerprint = lambda p: None
+        res = ob.maybe_capture(force=True)
+        self.assertTrue(res["captured"])
+        row = mem.conn.execute(
+            "SELECT embedding FROM episodes WHERE mem_type=?", (OBSERVATION,)).fetchone()
+        got = _unpack_floats(row["embedding"])
+        for a, b in zip(got, [0.5, 0.6, 0.7, 0.8]):
+            self.assertAlmostEqual(a, b, places=5)
+        self.assertFalse(p.exists())   # pixels still dropped
+        mem.close()
+
+
 class RLCreditAssignmentTests(unittest.TestCase):
     def _skills(self):
         from brain.skills import SkillStore

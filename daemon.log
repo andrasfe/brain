@@ -1,3 +1,148 @@
 [daemon] starting in state=wake (tick=2.0s, idle_rate=0.0, adapters=none, coalesce=60s/8 items)
 Type a task and hit Enter to enqueue it (if stdin adapter is on). Ctrl-C to exit.
 
+
+[state] wake → drowsy (fatigue=1.00 hour=21.699999999999825)
+
+[state] drowsy → nrem (fatigue=1.00 hour=21.899999999999824)
+
+[nrem] bout starts (cycle 1)
+  consolidator: 80 candidate(s), 14 cluster(s), 4 eligible
+    + semantic: We need to distill one durable semantic fact capturing recurring pattern across traces. The cluster includes disposition
+    + semantic: We need to distill one durable semantic fact capturing recurring pattern across these episodic traces. The cluster inclu
+    + semantic: We need to distill one durable semantic fact from cluster. The cluster is 7 identical episodic traces: "small circle of 
+    + semantic: We are given a cluster of 7 episodic memory traces.
+ Each trace is identical: "older sister Maria, doctor, calls weekly"
+    forward_model: only 3 triples (< 40); skipping
+
+[state] nrem → rem (fatigue=0.27 hour=23.09999999999982)
+
+[rem] bout starts (cycle 2)
+    💤 dream: We need to produce a brief connecting hypothesis/metaphor/what-if in first person, ≤25 words. Pair: blog post on graph a
+    💤 dream: We need to produce one brief connecting hypothesis/metaphor/what-if in first person, ≤ 25 words.
+
+Memory A: older sister
+    💤 dream: We need to produce a brief connecting hypothesis/metaphor/what-if in first person, ≤25 words.
+
+We have Memory A: self-pe
+
+[state] rem → nrem (fatigue=0.27 hour=23.899999999999817)
+
+[state] nrem → rem (fatigue=0.27 hour=0.6999999999998168)
+
+[rem] bout starts (cycle 4)
+    💤 dream: We need to produce a connecting hypothesis/metaphor/what-if in first person, ≤25 words, using both memories: older siste
+    💤 dream: We need to produce one brief connecting hypothesis/metaphor/what-if in first person, ≤25 words. Use both memory traces: 
+    💤 dream: We need to produce a connecting hypothesis/metaphor/what-if in first person, <=25 words, based on Memory A: self-perceiv
+
+[state] rem → nrem (fatigue=0.27 hour=1.8999999999998165)
+
+[state] nrem → rem (fatigue=0.27 hour=2.699999999999817)
+
+[rem] bout starts (cycle 6)
+    💤 dream: We need to combine two unrelated memory traces:
+
+Memory A: episodic/prior disposition: self-perceived disposition: burnt
+    💤 dream: We need to produce a connecting hypothesis/metaphor/what-if in first person, ≤25 words. Pair: memory A: finished maratho
+    💤 dream: We need to produce a connecting hypothesis/metaphor/what-if in first person, max 25 words, one line, based on two unrela
+
+[state] rem → nrem (fatigue=0.27 hour=3.8999999999998183)
+
+[state] nrem → rem (fatigue=0.27 hour=4.699999999999819)
+
+[rem] bout starts (cycle 8)
+    💤 dream: We need a connecting hypothesis linking vinyl collecting hobby and being open to weird ideas. Must be first person, ≤25 
+    💤 dream: We need to combine both memories: older sister Maria is a doctor who calls weekly; I missed promotion and manager said "
+    💤 dream: We need to produce one brief connecting hypothesis/metaphor/what-if in first person, <=25 words.
+
+Given Memory A: self-p
+
+[state] rem → nrem (fatigue=0.27 hour=5.89999999999982)
+
+[state] nrem → rem (fatigue=0.27 hour=6.699999999999821)
+
+[rem] bout starts (cycle 10)
+    💤 dream: We need to produce a brief connecting hypothesis/metaphor/what-if in first person, <=25 words, based on two memories.
+
+M
+    💤 dream: We need to produce a connecting hypothesis/metaphor/what-if in first person, <=25 words, linking two unrelated memory tr
+    💤 dream: We need to produce a brief connecting hypothesis/metaphor/what-if in first person, <=25 words.
+
+Memory A: obscure podcas
+
+[state] rem → nrem (fatigue=0.27 hour=7.899999999999822)
+
+[state] nrem → rem (fatigue=0.27 hour=8.69999999999982)
+
+[rem] bout starts (cycle 12)
+    💤 dream: We need to produce a connecting hypothesis/metaphor/what-if based on two memories: older sister Maria, doctor, calls wee
+    💤 dream: We need a brief connecting hypothesis/metaphor/what-if in first person, <=25 words. Memory A: self-perceived disposition
+    💤 dream: We need to produce a connecting hypothesis/metaphor/what-if in first person, <=25 words.
+
+Memory A: self-perceived dispo
+
+[state] rem → nrem (fatigue=0.27 hour=9.899999999999816)
+
+[state] nrem → rem (fatigue=0.27 hour=10.699999999999813)
+
+[rem] bout starts (cycle 14)
+    💤 dream: We need to produce a connecting hypothesis/metaphor/what-if in first person, ≤25 words. Memory A: Sam's father is in hos
+    💤 dream: We need to produce a connecting hypothesis/metaphor/what-if in first person, <=25 words, linking Memory A: "self-perceiv
+    💤 dream: We need to produce a brief connecting hypothesis/metaphor/what-if in first person, ≤25 words. Memory A: self-perceived d
+
+[state] rem → nrem (fatigue=0.27 hour=11.899999999999809)
+
+[state] nrem → rem (fatigue=0.27 hour=12.699999999999806)
+
+[rem] bout starts (cycle 16)
+    💤 dream: We need a connecting hypothesis linking vinyl collecting hobby and being open to weird ideas, in first person, ≤25 words
+    💤 dream: We need to produce one brief connecting hypothesis, metaphor, or "what if" in first person, ≤25 words. The pair is truly
+    💤 dream: We need to produce a connecting hypothesis/metaphor/what-if in first person, <=25 words. Pair: Memory A: finished marath
+
+[state] rem → nrem (fatigue=0.27 hour=13.899999999999801)
+
+[state] nrem → rem (fatigue=0.27 hour=14.699999999999799)
+
+[rem] bout starts (cycle 18)
+    💤 dream: We need to produce a connecting hypothesis/metaphor/what-if in first person, <=25 words, based on Memory A (self-perceiv
+    💤 dream: We need to produce a "dream hypothesis" connecting Memory A and Memory B.
+
+Memory A: semantic distilled fact: we have a 
+    💤 dream: We need to produce a brief connecting hypothesis/metaphor/what-if in first person, ≤25 words. Two unrelated memory trace
+
+[state] rem → nrem (fatigue=0.27 hour=15.899999999999794)
+
+[state] nrem → rem (fatigue=0.27 hour=16.699999999999793)
+
+[rem] bout starts (cycle 20)
+    💤 dream: We need to produce a connecting hypothesis/metaphor/what-if in first person, ≤25 words.
+
+Memory A: "we have a small circ
+    💤 dream: We need to combine two unrelated memory traces into a brief connecting hypothesis/metaphor/what-if in first person, <=25
+    💤 dream: We need to produce a connecting hypothesis/metaphor/what if, from first person perspective, linking Memory A (small circ
+
+[state] rem → nrem (fatigue=0.27 hour=17.89999999999979)
+
+[state] nrem → rem (fatigue=0.27 hour=18.699999999999786)
+
+[rem] bout starts (cycle 22)
+    💤 dream: We need a connecting hypothesis/metaphor/what-if in first person, ≤25 words.
+
+Given Memory A: older sister Maria, doctor
+    💤 dream: We need to produce a connecting hypothesis/metaphor/what-if in first person, ≤25 words.
+
+Memory A: "we have a small circ
+    💤 dream: We need to produce a connecting hypothesis/metaphor/what-if in first person, ≤25 words, linking self-perceived dispositi
+
+[state] rem → nrem (fatigue=0.27 hour=19.899999999999782)
+
+[state] nrem → rem (fatigue=0.27 hour=20.69999999999978)
+
+[rem] bout starts (cycle 24)
+    💤 dream: We need to produce a "dream hypothesis" connecting Memory A (identity: Alex Mendez, data scientist in Berlin, climbing f
+    💤 dream: We need to produce a brief connecting hypothesis/metaphor/what-if in first person, <=25 words.
+
+Memory A: self-perceived
+    💤 dream: We need to connect two unrelated memory traces: "finished marathon training" and "broke ankle bouldering last spring, st
+
+[state] rem → nrem (fatigue=0.27 hour=21.899999999999775)

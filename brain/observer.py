@@ -123,7 +123,9 @@ class ScreenObserver:
                  exclude_apps: Optional[list] = None,
                  vision_model: str = "",
                  change_detect: bool = True,
+                 visual_embedder=None,
                  time_fn=time.monotonic):
+        self.visual_embedder = visual_embedder
         self.cfg = cfg
         self.llm = llm
         self.memory = memory
@@ -268,6 +270,19 @@ class ScreenObserver:
             self.deduped += 1
             return {"captured": False, "reason": "unchanged"}
 
+        # DINOv2 image embedding (the screen-state vector) BEFORE pixel-drop,
+        # when a visual embedder is configured + available.
+        img_blob = None
+        if self.visual_embedder is not None and path:
+            try:
+                if getattr(self.visual_embedder, "available", False):
+                    vec = self.visual_embedder.embed(path)
+                    if vec:
+                        from .embeddings import _pack_floats
+                        img_blob = _pack_floats(vec)
+            except Exception:
+                img_blob = None
+
         description = ""
         try:
             if path and self.vision_model:
@@ -297,6 +312,7 @@ class ScreenObserver:
             content=content, salience=0.4,
             mem_type=OBSERVATION,
             tags=[f"app:{(app or 'unknown').lower()}"],
+            embedding=img_blob,   # DINOv2 image vector when enabled, else None
         )
         self.captured += 1
         return {"captured": True, "app": app, "content": content[:120],

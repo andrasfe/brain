@@ -53,7 +53,7 @@ class ScreenSequenceTrainer:
             return {"trained": False, "reason": "non-dense backend"}
 
         rows = memory.conn.execute(
-            "SELECT content, ts FROM episodes WHERE mem_type=? "
+            "SELECT content, ts, embedding FROM episodes WHERE mem_type=? "
             "ORDER BY ts ASC LIMIT ?", (OBSERVATION, self.window)
         ).fetchall()
         if len(rows) < self.min_pairs + 1:
@@ -63,13 +63,25 @@ class ScreenSequenceTrainer:
 
         from .forward_model_trainer import _Embedder
         emb = _Embedder(backend)
+
+        def vec_of(row):
+            # Prefer the stored embedding (DINOv2 image vector when visual
+            # embedding is enabled) — that IS the screen-state representation.
+            # Else embed the description text via the backend (text mode).
+            blob = row["embedding"]
+            if blob:
+                v = backend.from_bytes(blob)
+                if v:
+                    return np.asarray(v, np.float32)
+            return emb(row["content"])
+
         import numpy as np
         X, Y = [], []
         for a, b in zip(rows, rows[1:]):
             if (b["ts"] - a["ts"]) > self.max_gap_seconds:
                 continue  # don't pair across a gap (sleep/away)
-            va = emb(a["content"]); vb = emb(b["content"])
-            if va is None or vb is None:
+            va = vec_of(a); vb = vec_of(b)
+            if va is None or vb is None or len(va) != len(vb):
                 continue
             hour = time.localtime(a["ts"]).tm_hour + time.localtime(a["ts"]).tm_min / 60.0
             X.append(np.concatenate([va, np.asarray(time_features(hour), np.float32)]))

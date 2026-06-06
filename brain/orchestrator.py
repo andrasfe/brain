@@ -86,6 +86,10 @@ class Brain:
         # embedding space. The PFC consults it to ground its expected_result
         # predictions; the orchestrator writes a row after every action.
         self.world_model = WorldModelStore(cfg.db_path, backend=backend)
+        # Optional DINOv2 visual embedder (local) for screen-state vectors —
+        # shared by the observer (daemon) and the occipital region so they
+        # embed in the same space. None unless capture.visual_embed is set.
+        self.visual_embedder = self._build_visual_embedder(cfg)
         # Embodiment (afferent) — eyes + hands on the host computer. Optional:
         # built only when configured AND the afferent package is importable, so
         # the brain runs fine without it. Construction is isolated in a helper.
@@ -140,6 +144,7 @@ class Brain:
                 describe_with_vision=bool(emb_cfg.get("describe_with_vision", True)),
                 vision_model=str(emb_cfg.get("vision_model", "")),
                 screen_model=screen_model, memory=self.memory,
+                visual_embedder=self.visual_embedder,
             )
             self._observe_every = int(emb_cfg.get("observe_every", 3))
 
@@ -176,6 +181,16 @@ class Brain:
                 self.skills.reinforce(sig, eff, args, g, alpha=alpha)
         except Exception as e:  # noqa: BLE001 — learning must never break a run
             self.log(f"  ⚠ credit assignment skipped: {type(e).__name__}: {e}")
+
+    def _build_visual_embedder(self, cfg: Config):
+        mode = str((cfg.capture or {}).get("visual_embed", "none")).lower()
+        if mode == "none":
+            return None
+        try:
+            from .vision_embed import make_visual_embedder
+            return make_visual_embedder(mode)
+        except Exception:
+            return None
 
     def _load_screen_model(self, cfg: Config, backend):
         if not getattr(backend, "persistent", False):

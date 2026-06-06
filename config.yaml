@@ -133,6 +133,12 @@ capture:
   activity_window_seconds: 8  # idle <= this (and >= 1s) counts as "just settled"
   change_detect: true         # skip the VLM+embed when the screen is ~unchanged
   vision_model: ""            # blank = reflex-tier model
+  # Screen-state representation for the sequence model:
+  #   "none"   — embed the text description (EmbeddingGemma) [default]
+  #   "dinov2" — embed the screenshot with local DINOv2 (needs torch; no uploads)
+  #   "auto"   — DINOv2 if torch+model load, else text
+  visual_embed: "none"
+  min_train_pairs: 40         # min observation pairs before the sequence model trains
   # presence: the brain sleeps when you step away (idle past the threshold —
   # screensaver / lock / no input) and wakes when you return. Capture pauses
   # while away (nothing but a lock screen to see) — that's when heavy NREM/REM

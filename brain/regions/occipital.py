@@ -31,7 +31,7 @@ class Occipital(Region):
     def __init__(self, cfg, llm, embodiment, *,
                  describe_with_vision: bool = True,
                  vision_model: str = "",
-                 screen_model=None, memory=None):
+                 screen_model=None, memory=None, visual_embedder=None):
         super().__init__(cfg, llm)
         self.embodiment = embodiment
         self.describe_with_vision = describe_with_vision
@@ -41,6 +41,10 @@ class Occipital(Region):
         # embeds against, for novelty + anticipation signals. Optional.
         self.screen_model = screen_model
         self.memory = memory
+        # When set, the current screen is embedded with the SAME encoder the
+        # observation stream uses (DINOv2), keeping novelty/anticipation in the
+        # same space as the trained model. Else we fall back to text-embedding.
+        self.visual_embedder = visual_embedder
         self._last_prediction = None   # predicted embedding for THIS step
 
     def step(self, ws: Workspace) -> Broadcast | None:
@@ -78,8 +82,16 @@ class Occipital(Region):
         novelty = None
         anticipated = None
         salience = 0.5
-        if self.screen_model is not None and self.memory is not None and described:
-            cur = self._embed(described)
+        if self.screen_model is not None and self.memory is not None:
+            # Same encoder as the observation stream: DINOv2 image embed when
+            # available, else text-embed of the description.
+            cur = None
+            if (self.visual_embedder is not None
+                    and getattr(self.visual_embedder, "available", False)
+                    and obs.frame is not None and obs.frame.path):
+                cur = self.visual_embedder.embed(obs.frame.path)
+            if cur is None and described:
+                cur = self._embed(described)
             if cur is not None:
                 from ..screen_model import cosine_distance, make_screen_model  # noqa: F401
                 # novelty: did this screen match what we predicted last step?
@@ -101,12 +113,19 @@ class Occipital(Region):
         if anticipated:
             content += f"  [likely next: {anticipated[:60]}]"
 
+        # PIXEL-DROP: occipital captured its own frame; delete it once used.
+        if obs.frame is not None and obs.frame.path:
+            try:
+                import os
+                os.remove(obs.frame.path)
+            except OSError:
+                pass
+
         return ws.post(Broadcast(
             source=self.name, kind="vision",
             content=content,
             salience=salience,
             data={"frontmost_app": obs.frontmost_app,
-                  "frame": obs.frame.path if obs.frame else None,
                   "n_elements": len(obs.elements),
                   "novelty": novelty, "anticipated": anticipated},
         ))

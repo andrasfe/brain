@@ -180,6 +180,7 @@ class BrainDaemon:
                 exclude_apps=cap_cfg.get("exclude_apps"),
                 vision_model=str(cap_cfg.get("vision_model", "")),
                 change_detect=bool(cap_cfg.get("change_detect", True)),
+                visual_embedder=getattr(brain, "visual_embedder", None),
             )
             if not self.observer.ok:
                 self.log(f"  ⚠ screen capture refused: {self.observer.reason}")
