@@ -65,11 +65,18 @@ class ForwardModel:
 
     # ── forward ───────────────────────────────────────────────────────────────
     def _forward(self, X):
-        Xn = (X - self.mu) / self.sd
-        z1 = Xn @ self.W1 + self.b1
-        h = _gelu(z1)
-        out_emb = h @ self.Wo + self.bo
-        ok_logit = (h @ self.Wk + self.bk).ravel()
+        # numpy 2.0's BLAS matmul spuriously reports benign FP flags
+        # (underflow, and "divide by zero" attributed from the preceding
+        # /sd normalization). Suppress locally — no global leak, covers both
+        # training and the production predict() path. The clip on z1 keeps the
+        # x**3 GELU term from genuinely overflowing in float32.
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore",
+                         under="ignore"):
+            Xn = (X - self.mu) / self.sd
+            z1 = np.clip(Xn @ self.W1 + self.b1, -30.0, 30.0)
+            h = _gelu(z1)
+            out_emb = h @ self.Wo + self.bo
+            ok_logit = (h @ self.Wk + self.bk).ravel()
         return Xn, z1, h, out_emb, ok_logit
 
     def predict(self, state_emb, action_emb) -> Tuple[np.ndarray, float]:
@@ -80,7 +87,7 @@ class ForwardModel:
         return out_emb[0], float(_sigmoid(ok_logit)[0])
 
     # ── training (Adam, MSE + BCE) ──────────────────────────────────────────────
-    def fit(self, X, Y_emb, y_ok, *, epochs: int = 300, lr: float = 3e-3,
+    def fit(self, X, Y_emb, y_ok, *, epochs: int = 300, lr: float = 1.5e-3,
             batch: int = 32, val_frac: float = 0.15, ok_weight: float = 1.0,
             seed: int = 0, log=None) -> dict:
         log = log or (lambda _m: None)
@@ -115,43 +122,58 @@ class ForwardModel:
                                   + (1 - y_ok[ix]) * np.log(1 - p + 1e-7))))
             return mse + ok_weight * bce
 
-        for ep in range(epochs):
-            perm = rng.permutation(len(tr_idx))
-            for s in range(0, len(tr_idx), batch):
-                bi = tr_idx[perm[s:s + batch]]
-                if len(bi) == 0:
-                    continue
-                Xb, Yb, kb = X[bi], Y_emb[bi], y_ok[bi]
-                Xn, z1, h, oe, kl = self._forward(Xb)
-                nb = Xb.shape[0]
-                # grads — output (MSE) head
-                d_oe = (2.0 / nb) * (oe - Yb)                  # (nb, emb)
-                gWo = h.T @ d_oe
-                gbo = d_oe.sum(axis=0)
-                # ok (BCE) head
-                p = _sigmoid(kl)
-                d_kl = (ok_weight / nb) * (p - kb)             # (nb,)
-                gWk = h.T @ d_kl[:, None]
-                gbk = np.array([d_kl.sum()], dtype=np.float32)
-                # backprop into hidden
-                dh = d_oe @ self.Wo.T + d_kl[:, None] @ self.Wk.T
-                dz1 = dh * _gelu_grad(z1)
-                gW1 = Xn.T @ dz1
-                gb1 = dz1.sum(axis=0)
-                grads = [gW1, gb1, gWo, gbo, gWk, gbk]
-                # Adam
-                t += 1
-                for i, (pgrad) in enumerate(grads):
-                    m[i] = b1a * m[i] + (1 - b1a) * pgrad
-                    v[i] = b2a * v[i] + (1 - b2a) * (pgrad ** 2)
-                    mhat = m[i] / (1 - b1a ** t)
-                    vhat = v[i] / (1 - b2a ** t)
-                    params[i] -= lr * mhat / (np.sqrt(vhat) + eps)
-            if n_val:
-                vl = loss_on(val_idx)
-                if vl < best_val:
-                    best_val = vl
-                    best = [p.copy() for p in params]
+        # Wrap all training math in one errstate: numpy-2.0 BLAS matmul
+        # spuriously reports benign FP flags (underflow, etc.). Single context,
+        # entered once. Best-val checkpointing + the non-finite-batch skip keep
+        # the returned weights genuinely finite regardless.
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore",
+                         under="ignore"):
+            for ep in range(epochs):
+                perm = rng.permutation(len(tr_idx))
+                for s in range(0, len(tr_idx), batch):
+                    bi = tr_idx[perm[s:s + batch]]
+                    if len(bi) == 0:
+                        continue
+                    Xb, Yb, kb = X[bi], Y_emb[bi], y_ok[bi]
+                    Xn, z1, h, oe, kl = self._forward(Xb)
+                    # Skip a non-finite batch rather than poison the weights.
+                    if not (np.isfinite(oe).all() and np.isfinite(kl).all()):
+                        continue
+                    nb = Xb.shape[0]
+                    # grads — output (MSE) head
+                    d_oe = (2.0 / nb) * (oe - Yb)                  # (nb, emb)
+                    gWo = h.T @ d_oe
+                    gbo = d_oe.sum(axis=0)
+                    # ok (BCE) head
+                    p = _sigmoid(kl)
+                    d_kl = (ok_weight / nb) * (p - kb)             # (nb,)
+                    gWk = h.T @ d_kl[:, None]
+                    gbk = np.array([d_kl.sum()], dtype=np.float32)
+                    # backprop into hidden
+                    dh = d_oe @ self.Wo.T + d_kl[:, None] @ self.Wk.T
+                    dz1 = dh * _gelu_grad(z1)
+                    gW1 = Xn.T @ dz1
+                    gb1 = dz1.sum(axis=0)
+                    grads = [gW1, gb1, gWo, gbo, gWk, gbk]
+                    # Global-norm gradient clipping — bounds tiny-data steps.
+                    gnorm = np.sqrt(sum(float(np.sum(g * g)) for g in grads)) + 1e-12
+                    clip = 5.0
+                    if gnorm > clip:
+                        scale = clip / gnorm
+                        grads = [g * scale for g in grads]
+                    # Adam
+                    t += 1
+                    for i, (pgrad) in enumerate(grads):
+                        m[i] = b1a * m[i] + (1 - b1a) * pgrad
+                        v[i] = b2a * v[i] + (1 - b2a) * (pgrad ** 2)
+                        mhat = m[i] / (1 - b1a ** t)
+                        vhat = v[i] / (1 - b2a ** t)
+                        params[i] -= lr * mhat / (np.sqrt(vhat) + eps)
+                if n_val:
+                    vl = loss_on(val_idx)
+                    if vl < best_val and np.isfinite(vl):
+                        best_val = vl
+                        best = [p.copy() for p in params]
         # restore best-val checkpoint
         if best is not None:
             for p, bp in zip(params, best):

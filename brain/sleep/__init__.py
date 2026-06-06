@@ -7,8 +7,9 @@ from .dreamer import Dreamer
 from .forgetter import Forgetter
 from .forward_model_trainer import ForwardModelTrainer
 from .mood_regulator import MoodRegulator
+from .purger import ScreenPurger
 from .scheduler import Scheduler
 from .skill_pruner import SkillPruner
 
 __all__ = ["Dreamer", "Forgetter", "ForwardModelTrainer", "MoodRegulator",
-           "Scheduler", "SkillPruner"]
+           "ScreenPurger", "Scheduler", "SkillPruner"]

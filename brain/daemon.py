@@ -54,9 +54,12 @@ from brain.inputs import (  # noqa: E402
 )
 from brain.inputs.classifier import ClassifierRules  # noqa: E402
 from brain.orchestrator import Brain  # noqa: E402
+from brain.observer import ScreenObserver  # noqa: E402
 from brain.sleep import (  # noqa: E402
-    Dreamer, Forgetter, ForwardModelTrainer, MoodRegulator, Scheduler, SkillPruner,
+    Dreamer, Forgetter, ForwardModelTrainer, MoodRegulator, ScreenPurger,
+    Scheduler, SkillPruner,
 )
+from brain.status import write_status  # noqa: E402
 from brain.workspace import Broadcast  # noqa: E402
 
 
@@ -80,6 +83,7 @@ class DaemonStats:
     facts_consolidated: int = 0
     prospective_fired: int = 0
     forward_model_trains: int = 0
+    observations_pruned: int = 0
 
 
 class BrainDaemon:
@@ -133,6 +137,28 @@ class BrainDaemon:
         self.dreamer = Dreamer(seed=seed)
         self.scheduler = Scheduler()
         self.forward_model_trainer = ForwardModelTrainer()
+
+        # Screen observation (privacy-first) — only when capture is enabled in
+        # config AND the brain is embodied (needs eyes). The observer enforces
+        # local-only and drops pixels; the purger enforces retention.
+        cap_cfg = cfg.capture or {}
+        frames_dir = str(Path(cfg.sandbox_dir) / "frames")
+        self.observer = None
+        if cap_cfg.get("enabled") and getattr(brain, "embodiment", None) is not None:
+            self.observer = ScreenObserver(
+                cfg, brain.llm, brain.memory, brain.embodiment,
+                interval_seconds=float(cap_cfg.get("interval_seconds", 30)),
+                exclude_apps=cap_cfg.get("exclude_apps"),
+                vision_model=str(cap_cfg.get("vision_model", "")),
+            )
+            if not self.observer.ok:
+                self.log(f"  ⚠ screen capture refused: {self.observer.reason}")
+        self.screen_purger = ScreenPurger(
+            max_age_days=float(cap_cfg.get("max_age_days", 30)),
+            max_rows=int(cap_cfg.get("max_rows", 20000)),
+            capture_dir=frames_dir,
+            max_dir_mb=float(cap_cfg.get("max_dir_mb", 200)),
+        )
 
         # Input adapters + classifier (load-shedding for continuous streams)
         self.adapters: list[InputAdapter] = list(adapters or [])
@@ -207,6 +233,18 @@ class BrainDaemon:
     # ── one tick ────────────────────────────────────────────────────────────
     def tick(self) -> None:
         self.tick_n += 1
+
+        # ── screen observation (privacy-first; rate-limited internally) ────
+        # The brain watches the user's screen continuously to learn — embeds
+        # locally and drops pixels immediately. Independent of wake/sleep.
+        if self.observer is not None:
+            try:
+                self.observer.maybe_capture()
+            except Exception as e:
+                self.log(f"[daemon] observer error: {e}")
+
+        # ── publish live status for the UI ─────────────────────────────────
+        self._write_status()
 
         # ── poll input adapters → classify → route ─────────────────────────
         # This is the streaming load-shedder. Every item goes through the
@@ -306,6 +344,30 @@ class BrainDaemon:
         # State transition based on affect + clock
         self._maybe_transition()
 
+    # ── status publishing for the UI ─────────────────────────────────────────
+    def _write_status(self) -> None:
+        try:
+            a = self.affect
+            payload = {
+                "ts": time.time(),
+                "state": self.state,
+                "tick": self.tick_n,
+                "sleep_bout": self._sleep_bout_kind,
+                "affect": {
+                    "mood_label": a.mood_label,
+                    "valence": round(a.valence, 3),
+                    "arousal": round(a.arousal, 3),
+                    "stress": round(a.stress, 3),
+                    "fatigue": round(a.fatigue, 3),
+                    "boredom": round(a.boredom, 3),
+                },
+                "stats": self.stats.__dict__,
+                "capture": self.observer.stats() if self.observer else None,
+            }
+            write_status(self.cfg, payload)
+        except Exception:
+            pass
+
     # ── per-state ticks ─────────────────────────────────────────────────────
     def _tick_wake(self) -> None:
         # 1. Legacy input queue (programmatic enqueue from before)
@@ -384,6 +446,14 @@ class BrainDaemon:
                     self.stats.forward_model_trains += 1
             except Exception as e:
                 self.log(f"  ⚠ forward_model trainer failed: {type(e).__name__}: {e}")
+            # screen purger: retention on the observation stream + orphan/disk cleanup
+            try:
+                pr = self.screen_purger.run(self.brain.memory,
+                                            log=lambda m: self.log(f"  {m}"))
+                self.stats.observations_pruned += (
+                    pr.get("pruned_age", 0) + pr.get("pruned_cap", 0))
+            except Exception as e:
+                self.log(f"  ⚠ screen_purger failed: {type(e).__name__}: {e}")
             self.stats.sleep_bouts["nrem"] += 1
         self._sleep_bouts_remaining -= 1
 

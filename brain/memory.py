@@ -41,7 +41,8 @@ SEMANTIC = "semantic"
 PROSPECTIVE = "prospective"
 AFFECT = "affect"
 SOURCE = "source"
-_VALID_TYPES = {EPISODIC, SEMANTIC, PROSPECTIVE, AFFECT, SOURCE}
+OBSERVATION = "observation"   # passive observation of the user's screen activity
+_VALID_TYPES = {EPISODIC, SEMANTIC, PROSPECTIVE, AFFECT, SOURCE, OBSERVATION}
 
 
 class Memory:

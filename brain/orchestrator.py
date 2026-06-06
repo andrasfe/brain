@@ -27,6 +27,7 @@ visible *inside* the thought stream, not just between turns.
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 from .affect import AffectState, Traits
@@ -176,7 +177,14 @@ class Brain:
                      "(pip install afferent) — running disembodied")
             return None
         backend_name = str(emb_cfg.get("backend", "fake")).lower()
-        backend = MacOSBackend() if backend_name == "macos" else FakeBackend()
+        if backend_name == "macos":
+            # Contain screenshot frames in a brain-owned dir so the purger /
+            # status tool know exactly where to look (and the observer drops
+            # them immediately anyway).
+            frames_dir = Path(cfg.sandbox_dir) / "frames"
+            backend = MacOSBackend(capture_dir=str(frames_dir))
+        else:
+            backend = FakeBackend()
         return Embodiment(
             backend,
             read_only=bool(emb_cfg.get("read_only", True)),

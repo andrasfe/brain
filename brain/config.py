@@ -94,6 +94,8 @@ class Config:
     # Embodiment (afferent) — eyes + hands on the host computer. Empty/disabled
     # by default. Defaulted so existing Config() callers keep working.
     embodiment: dict[str, Any] = field(default_factory=dict)
+    # Screen-observation capture (privacy-first, local-only). Disabled by default.
+    capture: dict[str, Any] = field(default_factory=dict)
 
     def model_for(self, region: str) -> str:
         """Resolve a region name to a concrete model id via its tier."""
@@ -177,4 +179,5 @@ def load_config(path: str | Path | None = None) -> Config:
         effectors=raw.get("effectors", {}),
         regions=raw.get("regions", {}),
         embodiment=raw.get("embodiment", {}),
+        capture=raw.get("capture", {}),
     )

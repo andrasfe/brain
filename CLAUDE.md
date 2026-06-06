@@ -104,6 +104,11 @@ python3 -m brain.consolidator --dry-run          # cluster + tag, no LLM
 # train the learned forward model (JEPA-lite) on world-model triples
 python3 -m brain.sleep.forward_model_trainer --epochs 300 --min-rows 40
 
+# brain status — snapshot, JSON, or an auto-refreshing web dashboard
+python3 -m brain.status                 # terminal snapshot
+python3 -m brain.status --json          # raw JSON
+python3 -m brain.status --serve 8800    # http://localhost:8800 (auto-refresh)
+
 # always-on daemon — WAKE / DROWSY / NREM / REM state machine + sleep agents
 python3 -m brain.daemon
 python3 -m brain.daemon --tick-seconds 0.5 --idle-rate 0.05
@@ -299,6 +304,10 @@ either recovers ("Forget the cat; …") or drifts.
   - `scheduler.py` (always-on): fires `kind='time'` prospective triggers
     when their absolute time has arrived. Marks them done so they don't
     re-fire. Time triggers ROUSE the brain from sleep.
+  - `purger.py` / `ScreenPurger` (NREM): retention for the screen-observation
+    stream. Pixels are already dropped at capture, so this prunes old
+    `observation` rows (age + count caps), deletes orphaned PNGs in the
+    capture dir, and enforces a disk budget. Config under `capture:`.
   - `forward_model_trainer.py` (NREM): trains the learned forward model
     (`brain/forward_model.py`) on the accumulated `WorldModelStore` triples
     — gradient descent, not accumulation. This is where the world model
@@ -306,6 +315,22 @@ either recovers ("Forget the cat; …") or drifts.
     backend (EmbeddingGemma / sentence-transformers — TF-IDF is sparse and
     not trainable), or below `min_rows`. Saves a best-val checkpoint next to
     the memory DB and refreshes the live cerebellum's model.
+
+- **`brain/observer.py`** — `ScreenObserver`: the brain passively watches the
+  user's screen to learn. Each capture: screenshot (afferent eyes, read-only)
+  → local vision-model description → text embedding → `observation` memory row
+  → **pixels deleted immediately** (we never hoard PNGs). PRIVACY-FIRST and
+  refuses to run unless it can keep data local: `privacy_ok(cfg)` rejects a
+  remote LLM/embedding endpoint (screen contents must never leave the machine);
+  an app **exclusion list** skips sensitive apps entirely; `pause()/resume()`.
+  Driven by the daemon, rate-limited by `interval_seconds`.
+
+- **`brain/status.py`** — status snapshot + UI. `gather_status(cfg)` reads the
+  daemon's `status.json` (live wake/sleep state + affect, written each tick by
+  `write_status`) plus direct read-only SQLite counts (memory by type, skills,
+  world-model rows, observations) + disk usage. `python -m brain.status`
+  prints it; `--json` dumps it; `--serve PORT` runs a stdlib `http.server`
+  auto-refreshing HTML dashboard (zero deps).
 
 - **`brain/forward_model.py`** — `ForwardModel`: a tiny numpy MLP (JEPA-lite).
   Maps `[state_emb ; action_emb] → (predicted_outcome_emb, success_prob)`;

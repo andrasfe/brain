@@ -103,3 +103,26 @@ embodiment:
   observe_every: 3            # occipital posts a vision broadcast every N steps
   describe_with_vision: true  # describe screenshots via the vision model
   vision_model: ""            # blank = reflex-tier model
+
+# Screen observation — the brain passively watches your screen to learn your
+# activity. PRIVACY-FIRST: refuses to run unless the LLM/embedding endpoint is
+# local (localhost); embeds the screenshot then DELETES the pixels; never
+# captures excluded apps; nothing leaves the machine. Requires embodiment
+# enabled (it uses the eyes; read_only is fine). The daemon runs capture; the
+# screen_purger (NREM) enforces retention. Off by default.
+capture:
+  enabled: false
+  interval_seconds: 30        # min seconds between screenshots
+  vision_model: ""            # blank = reflex-tier model
+  exclude_apps:               # never captured (substring match on app name)
+    - "1Password"
+    - "Bitwarden"
+    - "Keychain Access"
+    - "Messages"
+    - "Signal"
+    - "WhatsApp"
+    - "Banking"
+  # retention (screen_purger, runs during NREM sleep)
+  max_age_days: 30
+  max_rows: 20000
+  max_dir_mb: 200

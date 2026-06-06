@@ -1973,5 +1973,221 @@ class ForwardModelTrainerTests(unittest.TestCase):
         wm.close()
 
 
+class ScreenObserverTests(unittest.TestCase):
+    """Capture loop + privacy spine — local-only, exclusion, pixel-drop."""
+
+    def _cfg(self, base_url="http://localhost:1234/v1", backend="openrouter"):
+        from brain.config import Config
+        tmp = Path(tempfile.mkdtemp())
+        return Config(
+            raw={"sandbox_dir": str(tmp)}, api_key="", base_url=base_url,
+            require_auth=False, extra_headers={},
+            models={"reflex": "vm", "executive": "y"},
+            timeout_seconds=10, max_retries=0,
+            sandbox_dir=tmp, db_path=tmp / "m.sqlite",
+            loop={}, memory={"embedding_backend": backend}, effectors={},
+            regions={},
+        )
+
+    def _emb_with_frame(self, app="Editor", make_file=True):
+        from afferent import Embodiment, FakeBackend
+        from afferent.types import Observation, Frame
+        path = None
+        if make_file:
+            p = Path(tempfile.mkdtemp()) / "afferent_frame_00001.png"
+            p.write_bytes(b"\x89PNG fake")
+            path = str(p)
+        obs = Observation(ts=0.0, frontmost_app=app,
+                          frame=Frame(id="f1", ts=0.0, path=path))
+        return Embodiment(FakeBackend(script=[obs]), read_only=True), path
+
+    def _memory(self, cfg):
+        from brain.memory import Memory
+        from brain.embeddings import TfidfBackend
+        return Memory(cfg.db_path, backend=TfidfBackend())
+
+    def test_refuses_remote_endpoint(self):
+        from brain.observer import privacy_ok
+        cfg = self._cfg(base_url="https://openrouter.ai/api/v1", backend="openrouter")
+        ok, reason = privacy_ok(cfg)
+        self.assertFalse(ok)
+        self.assertIn("remote", reason)
+
+    def test_allows_local_endpoint(self):
+        from brain.observer import privacy_ok
+        ok, _ = privacy_ok(self._cfg())
+        self.assertTrue(ok)
+
+    def test_local_embedding_backend_allows_even_if_llm_local(self):
+        from brain.observer import privacy_ok
+        cfg = self._cfg(base_url="http://localhost:1234/v1",
+                        backend="sentence_transformers")
+        ok, _ = privacy_ok(cfg)
+        self.assertTrue(ok)
+
+    def test_capture_stores_observation_and_drops_pixels(self):
+        from brain.observer import ScreenObserver
+        from brain.memory import OBSERVATION
+        cfg = self._cfg()
+        emb, path = self._emb_with_frame(app="Editor")
+        mem = self._memory(cfg)
+        llm = MagicMock()
+        llm.describe_image.return_value = "user editing a python file"
+        obs = ScreenObserver(cfg, llm, mem, emb, interval_seconds=0,
+                             vision_model="vm")
+        res = obs.maybe_capture(force=True)
+        self.assertTrue(res["captured"])
+        # observation row stored
+        rows = mem.recent(5, mem_type=OBSERVATION)
+        self.assertEqual(len(rows), 1)
+        self.assertIn("python", rows[0]["content"])
+        # PIXELS DROPPED
+        self.assertFalse(Path(path).exists())
+        mem.close()
+
+    def test_excluded_app_not_captured(self):
+        from brain.observer import ScreenObserver
+        from brain.memory import OBSERVATION
+        cfg = self._cfg()
+        emb, path = self._emb_with_frame(app="1Password")
+        mem = self._memory(cfg)
+        llm = MagicMock()
+        obs = ScreenObserver(cfg, llm, mem, emb, interval_seconds=0,
+                             vision_model="vm")
+        res = obs.maybe_capture(force=True)
+        self.assertFalse(res["captured"])
+        self.assertIn("excluded", res["reason"])
+        llm.describe_image.assert_not_called()
+        self.assertEqual(len(mem.recent(5, mem_type=OBSERVATION)), 0)
+        mem.close()
+
+    def test_refused_when_privacy_not_ok(self):
+        from brain.observer import ScreenObserver
+        cfg = self._cfg(base_url="https://openrouter.ai/api/v1")
+        emb, _ = self._emb_with_frame()
+        mem = self._memory(cfg)
+        obs = ScreenObserver(cfg, MagicMock(), mem, emb, interval_seconds=0)
+        res = obs.maybe_capture(force=True)
+        self.assertFalse(res["captured"])
+        self.assertIn("privacy", res["reason"])
+        mem.close()
+
+    def test_rate_limited(self):
+        from brain.observer import ScreenObserver
+        cfg = self._cfg()
+        emb, _ = self._emb_with_frame()
+        mem = self._memory(cfg)
+        llm = MagicMock(); llm.describe_image.return_value = "x"
+        clock = [100.0]
+        obs = ScreenObserver(cfg, llm, mem, emb, interval_seconds=30,
+                             vision_model="vm", time_fn=lambda: clock[0])
+        self.assertTrue(obs.maybe_capture()["captured"])
+        clock[0] += 5
+        self.assertFalse(obs.maybe_capture()["captured"])  # too soon
+        clock[0] += 40
+        # need a fresh frame for the second capture
+        from afferent.types import Observation, Frame
+        p = Path(tempfile.mkdtemp()) / "afferent_frame_00002.png"; p.write_bytes(b"x")
+        emb.backend._script = [Observation(ts=1.0, frontmost_app="Editor",
+                                           frame=Frame(id="f2", ts=1.0, path=str(p)))]
+        emb.backend._idx = 0
+        self.assertTrue(obs.maybe_capture()["captured"])
+        mem.close()
+
+
+class ScreenPurgerTests(unittest.TestCase):
+    def _mem(self):
+        from brain.memory import Memory
+        from brain.embeddings import TfidfBackend
+        return Memory(Path(tempfile.mkdtemp()) / "m.sqlite", backend=TfidfBackend())
+
+    def test_age_and_count_pruning(self):
+        from brain.memory import OBSERVATION
+        from brain.sleep import ScreenPurger
+        import time as _t
+        m = self._mem()
+        # 5 ancient + 5 recent observations
+        for _ in range(5):
+            rid = m.store("o", "activity", "old", 0.4, mem_type=OBSERVATION)
+            m.conn.execute("UPDATE episodes SET ts=? WHERE id=?",
+                           (_t.time() - 40 * 86400, rid))
+        for _ in range(5):
+            m.store("o", "activity", "recent", 0.4, mem_type=OBSERVATION)
+        m.conn.commit()
+        stats = ScreenPurger(max_age_days=30, max_rows=10000).run(m, log=lambda _m: None)
+        self.assertEqual(stats["pruned_age"], 5)
+        self.assertEqual(m.count(OBSERVATION), 5)
+        m.close()
+
+    def test_count_cap(self):
+        from brain.memory import OBSERVATION
+        from brain.sleep import ScreenPurger
+        m = self._mem()
+        for i in range(20):
+            m.store("o", "activity", f"obs{i}", 0.4, mem_type=OBSERVATION)
+        stats = ScreenPurger(max_age_days=999, max_rows=8).run(m, log=lambda _m: None)
+        self.assertEqual(stats["pruned_cap"], 12)
+        self.assertEqual(m.count(OBSERVATION), 8)
+        m.close()
+
+    def test_orphan_png_cleanup(self):
+        from brain.sleep import ScreenPurger
+        import os, time as _t
+        d = Path(tempfile.mkdtemp())
+        old = d / "afferent_frame_00001.png"; old.write_bytes(b"x" * 10)
+        os.utime(old, (_t.time() - 600, _t.time() - 600))   # 10 min old → orphan
+        fresh = d / "afferent_frame_00002.png"; fresh.write_bytes(b"x")
+        m = self._mem()
+        stats = ScreenPurger(capture_dir=str(d)).run(m, log=lambda _m: None)
+        self.assertEqual(stats["files_removed"], 1)
+        self.assertFalse(old.exists())
+        self.assertTrue(fresh.exists())
+        m.close()
+
+
+class StatusTests(unittest.TestCase):
+    def _cfg(self):
+        from brain.config import Config
+        tmp = Path(tempfile.mkdtemp())
+        return Config(
+            raw={"sandbox_dir": str(tmp)}, api_key="", base_url="http://x",
+            require_auth=False, extra_headers={},
+            models={"reflex": "x", "executive": "y"},
+            timeout_seconds=10, max_retries=0,
+            sandbox_dir=tmp, db_path=tmp / "memory.sqlite3",
+            loop={}, memory={}, effectors={}, regions={},
+        )
+
+    def test_offline_when_no_daemon(self):
+        from brain.status import gather_status
+        snap = gather_status(self._cfg())
+        self.assertFalse(snap["daemon"]["live"])
+        self.assertEqual(snap["daemon"]["state"], "offline")
+
+    def test_reads_written_status_and_counts(self):
+        from brain.status import gather_status, write_status, render_text
+        from brain.memory import Memory, OBSERVATION, EPISODIC
+        from brain.embeddings import TfidfBackend
+        cfg = self._cfg()
+        m = Memory(cfg.db_path, backend=TfidfBackend())
+        m.store("t", "a", "ep", 0.5, mem_type=EPISODIC)
+        m.store("o", "activity", "obs", 0.4, mem_type=OBSERVATION)
+        m.close()
+        import time as _t
+        write_status(cfg, {"ts": _t.time(), "state": "nrem", "tick": 42,
+                           "affect": {"mood_label": "content", "valence": 0.2,
+                                      "arousal": 0.4, "stress": 0.1, "fatigue": 0.3},
+                           "capture": {"captured": 7, "skipped": 2,
+                                       "privacy_ok": True}})
+        snap = gather_status(cfg)
+        self.assertTrue(snap["daemon"]["live"])
+        self.assertEqual(snap["daemon"]["state"], "nrem")
+        self.assertEqual(snap["memory_by_type"].get(OBSERVATION), 1)
+        # rendering doesn't crash and includes key facts
+        txt = render_text(snap)
+        self.assertIn("nrem", txt)
+        self.assertIn("BRAIN STATUS", txt)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
