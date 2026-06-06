@@ -286,12 +286,17 @@ class ScreenObserver:
         description = ""
         try:
             if path and self.vision_model:
+                from .knowledge import render_rules
+                rules = render_rules(self.cfg.db_path)
+                app_known = app or "an unknown app"
                 raw = self.llm.describe_image(
                     self.vision_model,
-                    "Reply with ONE short sentence and nothing else — no "
-                    "preamble, no analysis, no list. What is the user doing on "
-                    "this screen (the app + the activity)? Do NOT transcribe "
-                    "passwords, secrets, or full personal messages.",
+                    f"The macOS frontmost application is '{app_known}' (read from "
+                    "the menu bar — this is GROUND TRUTH; do not name a different "
+                    "app).\n"
+                    f"Where to look on screen:\n{rules}\n\n"
+                    f"Reply with ONE short sentence and nothing else: what is the "
+                    f"user doing in {app_known}? No preamble, no analysis, no list.",
                     path,
                 )
                 description = clean_vision_text(raw)

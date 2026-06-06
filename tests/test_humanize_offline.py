@@ -2147,6 +2147,91 @@ class ScreenObserverTests(unittest.TestCase):
         mem.close()
 
 
+class ScreenReadingSkillTests(unittest.TestCase):
+    def test_seed_rules_present(self):
+        from brain import knowledge
+        rules = knowledge.load_rules(Path(tempfile.mkdtemp()) / "m.sqlite")
+        self.assertTrue(any("menu bar" in r.lower() for r in rules))
+
+    def test_append_and_dedup_learned_rule(self):
+        from brain import knowledge
+        db = Path(tempfile.mkdtemp()) / "m.sqlite"
+        self.assertTrue(knowledge.append_rule(db, "Check the Dock for the running app."))
+        # dedup
+        self.assertFalse(knowledge.append_rule(db, "Check the Dock for the running app."))
+        # dedup against seed
+        self.assertFalse(knowledge.append_rule(db, knowledge.SEED_RULES[0]))
+        rules = knowledge.load_rules(db)
+        self.assertIn("Check the Dock for the running app.", rules)
+
+    def test_observer_injects_ground_truth_app_and_rules(self):
+        from brain.observer import ScreenObserver
+        from brain.memory import Memory
+        from brain.embeddings import TfidfBackend
+        from brain.config import Config
+        from afferent import Embodiment, FakeBackend
+        from afferent.types import Observation, Frame
+        tmp = Path(tempfile.mkdtemp())
+        p = tmp / "afferent_frame_x.png"; p.write_bytes(b"png")
+        cfg = Config(raw={"sandbox_dir": str(tmp)}, api_key="",
+                     base_url="http://localhost:1234/v1", require_auth=False,
+                     extra_headers={}, models={"reflex": "vm", "executive": "y"},
+                     timeout_seconds=10, max_retries=0, sandbox_dir=tmp,
+                     db_path=tmp / "m.sqlite", loop={},
+                     memory={"embedding_backend": "openrouter"}, effectors={},
+                     regions={})
+        emb = Embodiment(FakeBackend(script=[Observation(
+            ts=0.0, frontmost_app="LM Studio", frame=Frame(id="f", ts=0.0, path=str(p)))]),
+            read_only=True)
+        mem = Memory(cfg.db_path, backend=TfidfBackend())
+        llm = MagicMock(); llm.describe_image.return_value = "Browsing models"
+        ob = ScreenObserver(cfg, llm, mem, emb, interval_seconds=0,
+                            vision_model="vm")
+        ob._fingerprint = lambda _p: None
+        ob.maybe_capture(force=True)
+        # the describe prompt must carry the ground-truth app + a rule
+        prompt = llm.describe_image.call_args[0][1]
+        self.assertIn("LM Studio", prompt)
+        self.assertIn("GROUND TRUTH", prompt)
+        self.assertIn("menu bar", prompt.lower())
+        mem.close()
+
+
+class VisionTeacherTests(unittest.TestCase):
+    def test_teacher_appends_rules_from_descriptions(self):
+        from brain.sleep import VisionTeacher
+        from brain.memory import Memory, OBSERVATION
+        from brain.embeddings import TfidfBackend
+        from brain import knowledge
+        tmp = Path(tempfile.mkdtemp())
+        mem = Memory(tmp / "m.sqlite", backend=TfidfBackend())
+        for i in range(12):
+            mem.store("s", "activity", f"[VS Code] editing file {i}", 0.4,
+                      mem_type=OBSERVATION)
+        llm = MagicMock()
+        llm.chat.return_value = ("Use the menu bar app name to disambiguate editors.\n"
+                                 "Read the window title for the open file.")
+        vt = VisionTeacher(min_obs=5, max_new_rules=2)
+        stats = vt.run(mem, llm, "exec-model", db_path=tmp / "m.sqlite",
+                       log=lambda _m: None)
+        self.assertTrue(stats["taught"])
+        self.assertEqual(stats["rules_added"], 2)
+        learned = knowledge.load_rules(tmp / "m.sqlite")
+        self.assertTrue(any("window title" in r.lower() for r in learned))
+        mem.close()
+
+    def test_teacher_noop_without_model(self):
+        from brain.sleep import VisionTeacher
+        from brain.memory import Memory
+        from brain.embeddings import TfidfBackend
+        tmp = Path(tempfile.mkdtemp())
+        mem = Memory(tmp / "m.sqlite", backend=TfidfBackend())
+        stats = VisionTeacher().run(mem, MagicMock(), None, db_path=tmp / "m.sqlite",
+                                    log=lambda _m: None)
+        self.assertFalse(stats["taught"])
+        mem.close()
+
+
 class EmbodimentSelfTestTests(unittest.TestCase):
     def test_selftest_only_moves_never_clicks_or_types(self):
         from brain.embodiment_selftest import run_selftest

@@ -58,7 +58,7 @@ from brain.observer import ScreenObserver  # noqa: E402
 from brain.presence import idle_seconds  # noqa: E402
 from brain.sleep import (  # noqa: E402
     Dreamer, Forgetter, ForwardModelTrainer, MoodRegulator, ScreenPurger,
-    Scheduler, ScreenSequenceTrainer, SkillPruner,
+    Scheduler, ScreenSequenceTrainer, SkillPruner, VisionTeacher,
 )
 from brain.status import write_status  # noqa: E402
 from brain.workspace import Broadcast  # noqa: E402
@@ -85,6 +85,7 @@ class DaemonStats:
     prospective_fired: int = 0
     forward_model_trains: int = 0
     screen_model_trains: int = 0
+    vision_rules_learned: int = 0
     observations_pruned: int = 0
 
 
@@ -153,6 +154,13 @@ class BrainDaemon:
             depth=int(fm_cfg.get("depth", 2)),
             epochs=int(fm_cfg.get("epochs", 200)),
             min_pairs=int((cfg.capture or {}).get("min_train_pairs", 40)),
+        )
+        # Teacher-student: the executive model curates the student's
+        # screen-reading skill during sleep. Only when capture is on.
+        self.vision_teacher = (
+            VisionTeacher(max_new_rules=int((cfg.capture or {}).get("vision_teacher_rules", 2)))
+            if (cfg.capture or {}).get("enabled") and (cfg.capture or {}).get("vision_teacher", True)
+            else None
         )
 
         # Screen observation (privacy-first) — only when capture is enabled in
@@ -497,6 +505,18 @@ class BrainDaemon:
                     self.stats.screen_model_trains += 1
             except Exception as e:
                 self.log(f"  ⚠ screen_sequence trainer failed: {type(e).__name__}: {e}")
+            # vision teacher: strong model curates the student's screen-reading
+            # skill from its recent descriptions.
+            if self.vision_teacher is not None:
+                try:
+                    vt = self.vision_teacher.run(
+                        self.brain.memory, self.brain.llm,
+                        self.cfg.models.get("executive"),
+                        db_path=self.cfg.db_path,
+                        log=lambda m: self.log(f"  {m}"))
+                    self.stats.vision_rules_learned += vt.get("rules_added", 0)
+                except Exception as e:
+                    self.log(f"  ⚠ vision_teacher failed: {type(e).__name__}: {e}")
             # screen purger: retention on the observation stream + orphan/disk cleanup
             try:
                 pr = self.screen_purger.run(self.brain.memory,
