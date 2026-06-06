@@ -6,4 +6,7 @@ PyYAML>=6.0
 afferent>=0.2.0  # optional (embodiment); brain runs fine without it
 # Optional — the sleep-trained forward model (brain/forward_model.py). Only
 # needed when training/using the learned world model; k-NN works without it.
-numpy>=1.24  # optional (learned forward model)
+numpy>=1.24  # optional (learned forward model — numpy fallback)
+# Optional — robust GPU-trained forward model on Apple silicon. When present,
+# the forward-model trainer uses MLX instead of the numpy MLP. Mac-only.
+mlx>=0.18  # optional (forward model, Apple silicon)

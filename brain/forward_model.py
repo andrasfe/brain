@@ -184,6 +184,8 @@ class ForwardModel:
         log(f"forward_model: trained on {n} rows, val_loss={stats['val_loss']}")
         return stats
 
+    kind = "numpy"
+
     # ── persistence ─────────────────────────────────────────────────────────────
     def save(self, path: Path) -> None:
         path = Path(path)
@@ -191,7 +193,7 @@ class ForwardModel:
         np.savez(str(path),
                  W1=self.W1, b1=self.b1, Wo=self.Wo, bo=self.bo,
                  Wk=self.Wk, bk=self.bk, mu=self.mu, sd=self.sd)
-        meta = {"emb_dim": self.emb_dim, "hidden": self.hidden,
+        meta = {"kind": "numpy", "emb_dim": self.emb_dim, "hidden": self.hidden,
                 "trained_rows": self.trained_rows}
         path.with_suffix(".json").write_text(json.dumps(meta))
 
@@ -212,3 +214,53 @@ class ForwardModel:
             return m
         except Exception:
             return None
+
+
+# ── backend factory ─────────────────────────────────────────────────────────
+def mlx_available() -> bool:
+    try:
+        import mlx.core  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def make_forward_model(emb_dim: int, *, backend: str = "auto",
+                       hidden: int = 256, depth: int = 2, dropout: float = 0.1,
+                       seed: int = 0):
+    """Construct a forward model. backend: 'auto' (MLX if available, else
+    numpy) | 'mlx' | 'numpy'. The MLX model is the robust GPU-trained net; the
+    numpy model is the dependency-light fallback (smaller default hidden)."""
+    backend = (backend or "auto").lower()
+    if backend in ("auto", "mlx") and mlx_available():
+        from .forward_model_mlx import MLXForwardModel
+        return MLXForwardModel(emb_dim=emb_dim, hidden=hidden, depth=depth,
+                               dropout=dropout, seed=seed)
+    if backend == "mlx" and not mlx_available():
+        # explicit request but unavailable — fall back loudly via caller logs
+        pass
+    return ForwardModel(emb_dim=emb_dim, hidden=min(hidden, 128), seed=seed)
+
+
+def load_forward_model(base_path: Path):
+    """Load whichever checkpoint exists at `base_path` (no suffix): prefer the
+    MLX checkpoint when present and MLX is importable, else the numpy .npz.
+    Returns None when neither is found."""
+    base = Path(base_path)
+    meta = base.with_suffix(".json")
+    kind = None
+    if meta.exists():
+        try:
+            kind = json.loads(meta.read_text()).get("kind")
+        except Exception:
+            kind = None
+    mlx_ckpt = base.with_suffix(".mlx.safetensors")
+    if (kind == "mlx" or mlx_ckpt.exists()) and mlx_available():
+        try:
+            from .forward_model_mlx import MLXForwardModel
+            m = MLXForwardModel.load(base)
+            if m is not None:
+                return m
+        except Exception:
+            pass
+    return ForwardModel.load(base)

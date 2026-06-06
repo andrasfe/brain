@@ -349,14 +349,24 @@ either recovers ("Forget the cat; …") or drifts.
   prints it; `--json` dumps it; `--serve PORT` runs a stdlib `http.server`
   auto-refreshing HTML dashboard (zero deps).
 
-- **`brain/forward_model.py`** — `ForwardModel`: a tiny numpy MLP (JEPA-lite).
-  Maps `[state_emb ; action_emb] → (predicted_outcome_emb, success_prob)`;
-  MSE + BCE, Adam, best-val checkpointing, input normalization, save/load.
+- **`brain/forward_model.py` + `brain/forward_model_mlx.py`** — the learned
+  forward model (JEPA-lite): maps `[state_emb ; action_emb] →
+  (predicted_outcome_emb, success_prob)`. Two backends behind a factory
+  (`make_forward_model` / `load_forward_model`):
+  - **`MLXForwardModel`** (default on Apple silicon) — a robust residual MLP
+    (pre-norm residual blocks, LayerNorm, GELU, dropout) trained on the GPU
+    via Apple **MLX**: AdamW + weight decay, cosine LR with warmup, gradient
+    clipping, best-val checkpointing with early stopping. Scales to real
+    embedding dims + sizeable widths. Saves `.mlx.safetensors` + `.json`.
+  - **`ForwardModel`** (numpy fallback) — the dependency-light 2-layer MLP for
+    machines without MLX. Saves `.npz` + `.json`.
   The encoder (embedding backend) stays frozen; only the *predictor* is
   learned — training the encoder itself (full DINO/JEPA) is out of scope.
-  The cerebellum loads the checkpoint and uses the learned `success_prob`
-  to gate habit-fire (overriding the k-NN majority vote), generalizing where
-  k-NN has no neighbour. numpy is an optional dependency, guarded everywhere.
+  The cerebellum loads whichever checkpoint exists and uses the learned
+  `success_prob` to gate habit-fire (overriding the k-NN majority vote),
+  generalizing where k-NN has no neighbour. Both numpy and mlx are optional
+  deps, guarded everywhere; config under `forward_model:` (backend/hidden/
+  depth/epochs/lr).
 
 - **`brain/consolidator.py`** — the offline "sleep" pass. Greedy single-link
   clustering of recent episodic rows by TF-IDF cosine, then an LLM call per

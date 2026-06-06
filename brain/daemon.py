@@ -137,7 +137,15 @@ class BrainDaemon:
         self.mood_regulator = MoodRegulator()
         self.dreamer = Dreamer(seed=seed)
         self.scheduler = Scheduler()
-        self.forward_model_trainer = ForwardModelTrainer()
+        fm_cfg = (cfg.raw.get("forward_model") if isinstance(cfg.raw, dict) else {}) or {}
+        self.forward_model_trainer = ForwardModelTrainer(
+            backend=str(fm_cfg.get("backend", "auto")),
+            hidden=int(fm_cfg.get("hidden", 256)),
+            depth=int(fm_cfg.get("depth", 2)),
+            epochs=int(fm_cfg.get("epochs", 200)),
+            lr=float(fm_cfg.get("lr", 1e-3)),
+            min_rows=int(fm_cfg.get("min_rows", 40)),
+        )
 
         # Screen observation (privacy-first) — only when capture is enabled in
         # config AND the brain is embodied (needs eyes). The observer enforces

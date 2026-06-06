@@ -1,0 +1,3 @@
+[daemon] starting in state=wake (tick=2.0s, idle_rate=0.0, adapters=none, coalesce=60s/8 items)
+Type a task and hit Enter to enqueue it (if stdin adapter is on). Ctrl-C to exit.
+

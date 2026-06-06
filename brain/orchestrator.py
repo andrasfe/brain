@@ -152,12 +152,12 @@ class Brain:
         if not getattr(backend, "persistent", False):
             return None
         try:
-            from .forward_model import ForwardModel
+            from .forward_model import load_forward_model
             from .sleep.forward_model_trainer import default_checkpoint
         except ImportError:
             return None
         try:
-            return ForwardModel.load(default_checkpoint(cfg.db_path))
+            return load_forward_model(default_checkpoint(cfg.db_path))
         except Exception:
             return None
 

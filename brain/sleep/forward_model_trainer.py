@@ -23,26 +23,30 @@ from typing import Any, Optional
 
 
 def default_checkpoint(db_path) -> Path:
-    return Path(db_path).parent / "forward_model.npz"
+    # Stem (no suffix); each backend appends its own (.npz / .mlx.safetensors).
+    return Path(db_path).parent / "forward_model"
 
 
 class ForwardModelTrainer:
     name = "forward_model_trainer"
 
-    def __init__(self, hidden: int = 64, epochs: int = 300, lr: float = 3e-3,
-                 min_rows: int = 40, window: int = 2000):
+    def __init__(self, hidden: int = 256, depth: int = 2, epochs: int = 200,
+                 lr: float = 1e-3, min_rows: int = 40, window: int = 4000,
+                 backend: str = "auto"):
         self.hidden = hidden
+        self.depth = depth
         self.epochs = epochs
         self.lr = lr
         self.min_rows = min_rows
         self.window = window
+        self.backend = backend
 
     def run(self, memory, world_model, *, checkpoint: Optional[Path] = None,
             cerebellum=None, log=None) -> dict[str, Any]:
         log = log or (lambda _m: None)
         try:
             import numpy as np  # noqa: F401
-            from ..forward_model import ForwardModel
+            from ..forward_model import make_forward_model
         except ImportError:
             log("  forward_model: numpy not installed — skipping")
             return {"trained": False, "reason": "numpy missing"}
@@ -81,7 +85,8 @@ class ForwardModelTrainer:
                     "rows": len(X)}
 
         emb_dim = len(Y[0])
-        model = ForwardModel(emb_dim=emb_dim, hidden=self.hidden)
+        model = make_forward_model(emb_dim, backend=self.backend,
+                                   hidden=self.hidden, depth=self.depth)
         stats = model.fit(np.asarray(X), np.asarray(Y), np.asarray(ok),
                           epochs=self.epochs, lr=self.lr, log=log)
 

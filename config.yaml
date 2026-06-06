@@ -75,6 +75,19 @@ regions:
   locus_coeruleus:   reflex   # deterministic
   vta:               reflex   # deterministic
 
+# Learned forward model (trained during NREM sleep on world-model triples).
+#   backend: "auto" (MLX on Apple silicon, else numpy) | "mlx" | "numpy"
+# MLX is the robust GPU-trained net (residual MLP, AdamW, cosine LR, dropout,
+# early stop); numpy is the dependency-light fallback. Needs a dense embedding
+# backend; no-ops on TF-IDF / too little data.
+forward_model:
+  backend: "auto"
+  hidden: 256
+  depth: 2
+  epochs: 200
+  lr: 0.001
+  min_rows: 40
+
 # Humanization — persistent mood/drives/distractions and an ambient world.
 # Set humanize=false to fall back to the vanilla GWT brain (for A/B eval).
 humanize: true

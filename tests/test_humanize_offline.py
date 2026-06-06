@@ -1859,6 +1859,54 @@ class ForwardModelTests(unittest.TestCase):
         from brain.forward_model import ForwardModel
         self.assertIsNone(ForwardModel.load(Path(tempfile.mkdtemp()) / "nope.npz"))
 
+    def test_factory_falls_back_to_numpy_without_mlx(self):
+        from brain import forward_model as fm
+        from unittest import mock
+        with mock.patch.object(fm, "mlx_available", return_value=False):
+            m = fm.make_forward_model(8, backend="auto")
+        self.assertEqual(m.kind, "numpy")
+
+
+class MLXForwardModelTests(unittest.TestCase):
+    def setUp(self):
+        from brain.forward_model import mlx_available
+        if not mlx_available():
+            self.skipTest("mlx not installed")
+
+    def test_mlx_learns_success_pattern(self):
+        import numpy as np
+        from brain.forward_model_mlx import MLXForwardModel
+        rng = np.random.RandomState(0); emb = 8; N = 300
+        S = rng.randn(N, emb).astype(np.float32)
+        A = rng.randn(N, emb).astype(np.float32)
+        X = np.concatenate([S, A], axis=1)
+        ok = (S[:, 0] + S[:, 1] > 0).astype(np.float32)   # learnable rule
+        Y = S + 0.1 * A
+        m = MLXForwardModel(emb_dim=emb, hidden=64, depth=2, dropout=0.0, seed=1)
+        m.fit(X, Y, ok, epochs=120, lr=2e-3, seed=1)
+        correct = sum(int((m.predict(S[i], A[i])[1] >= 0.5) == bool(ok[i]))
+                      for i in range(N))
+        self.assertGreater(correct / N, 0.85)
+
+    def test_mlx_factory_and_save_load_roundtrip(self):
+        import numpy as np
+        from brain.forward_model import make_forward_model, load_forward_model
+        m = make_forward_model(6, backend="mlx", hidden=32, depth=1)
+        self.assertEqual(m.kind, "mlx")
+        X = np.random.RandomState(0).randn(40, 12).astype(np.float32)
+        Y = np.random.RandomState(1).randn(40, 6).astype(np.float32)
+        ok = (np.arange(40) % 2).astype(np.float32)
+        m.fit(X, Y, ok, epochs=15)
+        s = np.random.RandomState(3).randn(6).astype(np.float32)
+        a = np.random.RandomState(4).randn(6).astype(np.float32)
+        before = m.predict(s, a)[1]
+        base = Path(tempfile.mkdtemp()) / "forward_model"
+        m.save(base)
+        loaded = load_forward_model(base)        # factory picks MLX by meta
+        self.assertEqual(loaded.kind, "mlx")
+        after = loaded.predict(s, a)[1]
+        self.assertAlmostEqual(before, after, places=4)
+
 
 class _DenseBackendStub:
     """Deterministic dense embedding backend for forward-model tests:
@@ -1902,14 +1950,18 @@ class ForwardModelTrainerTests(unittest.TestCase):
     def test_trainer_trains_and_saves(self):
         from brain.sleep import ForwardModelTrainer
         from brain.memory import Memory
+        from brain.forward_model import load_forward_model
         wm = self._world_model_with_triples(60)
         tmp = Path(tempfile.mkdtemp())
         mem = Memory(tmp / "m.sqlite", backend=_DenseBackendStub())
-        ckpt = tmp / "fm.npz"
-        stats = ForwardModelTrainer(epochs=50, min_rows=20).run(
+        ckpt = tmp / "forward_model"      # stem; backend appends its own suffix
+        stats = ForwardModelTrainer(epochs=40, min_rows=20).run(
             mem, wm, checkpoint=ckpt, log=lambda _m: None)
         self.assertTrue(stats["trained"])
-        self.assertTrue(ckpt.exists())
+        # a checkpoint of whichever backend was used is loadable
+        loaded = load_forward_model(ckpt)
+        self.assertIsNotNone(loaded)
+        self.assertIn(loaded.kind, ("mlx", "numpy"))
         mem.close(); wm.close()
 
     def test_trainer_noops_on_nondense_backend(self):
