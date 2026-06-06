@@ -58,7 +58,7 @@ from brain.observer import ScreenObserver  # noqa: E402
 from brain.presence import idle_seconds  # noqa: E402
 from brain.sleep import (  # noqa: E402
     Dreamer, Forgetter, ForwardModelTrainer, MoodRegulator, ScreenPurger,
-    Scheduler, SkillPruner,
+    Scheduler, ScreenSequenceTrainer, SkillPruner,
 )
 from brain.status import write_status  # noqa: E402
 from brain.workspace import Broadcast  # noqa: E402
@@ -84,6 +84,7 @@ class DaemonStats:
     facts_consolidated: int = 0
     prospective_fired: int = 0
     forward_model_trains: int = 0
+    screen_model_trains: int = 0
     observations_pruned: int = 0
 
 
@@ -145,6 +146,13 @@ class BrainDaemon:
             epochs=int(fm_cfg.get("epochs", 200)),
             lr=float(fm_cfg.get("lr", 1e-3)),
             min_rows=int(fm_cfg.get("min_rows", 40)),
+        )
+        self.screen_sequence_trainer = ScreenSequenceTrainer(
+            backend=str(fm_cfg.get("backend", "auto")),
+            hidden=int(fm_cfg.get("hidden", 256)),
+            depth=int(fm_cfg.get("depth", 2)),
+            epochs=int(fm_cfg.get("epochs", 200)),
+            min_pairs=int((cfg.capture or {}).get("min_train_pairs", 40)),
         )
 
         # Screen observation (privacy-first) — only when capture is enabled in
@@ -476,6 +484,18 @@ class BrainDaemon:
                     self.stats.forward_model_trains += 1
             except Exception as e:
                 self.log(f"  ⚠ forward_model trainer failed: {type(e).__name__}: {e}")
+            # screen-sequence trainer: learn the dynamics of the user's day
+            # (next-screen prediction) from the observation stream; refresh the
+            # live occipital model.
+            try:
+                sm = self.screen_sequence_trainer.run(
+                    self.brain.memory,
+                    occipital=getattr(self.brain, "occipital", None),
+                    log=lambda m: self.log(f"  {m}"))
+                if sm.get("trained"):
+                    self.stats.screen_model_trains += 1
+            except Exception as e:
+                self.log(f"  ⚠ screen_sequence trainer failed: {type(e).__name__}: {e}")
             # screen purger: retention on the observation stream + orphan/disk cleanup
             try:
                 pr = self.screen_purger.run(self.brain.memory,

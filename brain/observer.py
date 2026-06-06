@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -42,6 +43,48 @@ _DEFAULT_EXCLUDE = [
 ]
 
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0", ""}
+
+# Reasoning-model preamble lines we never want in an activity label.
+_PREAMBLE_RE = re.compile(
+    r"^\s*(\d+[.)]\s|[-*]\s|the user (wants|is asking|is trying)|"
+    r"i (need|should|will|see)\b|let me\b|okay,?\b|first,?\b|"
+    r"based on (the|this)|to (answer|describe)|thinking|analysis|"
+    r"here('s| is)\b|step \d)",
+    re.IGNORECASE,
+)
+
+
+_NICETY_RE = re.compile(
+    r"^(the user (is |appears to be |seems to be )|the screen shows |"
+    r"this (is |screen )|it (looks like|appears) )",
+    re.IGNORECASE,
+)
+
+
+def clean_vision_text(text: str) -> str:
+    """Reduce a (possibly reasoning-laden) vision-model reply to one clean
+    activity label. Reasoning models put the actual answer LAST (after their
+    step-by-step), so we take the last non-preamble line, strip list markers
+    and 'the user is…' niceties."""
+    if not text:
+        return ""
+    text = text.strip().strip('"').strip("'")
+    lines = []
+    for raw in text.split("\n"):
+        line = re.sub(r"^\s*(\d+[.)]|[-*+])\s+", "", raw).strip().strip('"').strip("'")
+        if line:
+            lines.append(line)
+    # Prefer the LAST substantive non-preamble line (the conclusion).
+    for line in reversed(lines):
+        if len(line) >= 8 and not _PREAMBLE_RE.match(line):
+            line = _NICETY_RE.sub("", line).strip()
+            return (line[0].upper() + line[1:])[:200] if line else line
+    # Fallback: sentence-split the whole blob, last non-preamble sentence.
+    for c in reversed(re.split(r"(?<=[.!?])\s+", " ".join(lines))):
+        c = c.strip()
+        if len(c) >= 8 and not _PREAMBLE_RE.match(c):
+            return c[:200]
+    return (" ".join(lines))[:200]
 
 
 def endpoint_is_local(base_url: str) -> bool:
@@ -228,13 +271,15 @@ class ScreenObserver:
         description = ""
         try:
             if path and self.vision_model:
-                description = self.llm.describe_image(
+                raw = self.llm.describe_image(
                     self.vision_model,
-                    "In one sentence, what is the user doing on this screen? "
-                    "Name the app and the activity. Do NOT transcribe any "
+                    "Reply with ONE short sentence and nothing else — no "
+                    "preamble, no analysis, no list. What is the user doing on "
+                    "this screen (the app + the activity)? Do NOT transcribe "
                     "passwords, secrets, or full personal messages.",
                     path,
                 )
+                description = clean_vision_text(raw)
         finally:
             # PIXEL-DROP: delete the screenshot no matter what happened above.
             if path:

@@ -2147,6 +2147,117 @@ class ScreenObserverTests(unittest.TestCase):
         mem.close()
 
 
+class VisionCleanupTests(unittest.TestCase):
+    def test_strips_reasoning_preamble(self):
+        from brain.observer import clean_vision_text
+        msg = ("The user wants to know what they are doing.\n"
+               "1. Identify the app.\nLet me look.\n"
+               "The user is editing a Python file in VS Code.")
+        out = clean_vision_text(msg)
+        self.assertIn("editing", out.lower())
+        self.assertNotIn("The user wants", out)
+        self.assertNotIn("1.", out)
+
+    def test_clean_passthrough(self):
+        from brain.observer import clean_vision_text
+        self.assertEqual(clean_vision_text("Browsing Reddit in Safari."),
+                         "Browsing Reddit in Safari.")
+
+    def test_empty(self):
+        from brain.observer import clean_vision_text
+        self.assertEqual(clean_vision_text(""), "")
+
+
+class ScreenSequenceModelTests(unittest.TestCase):
+    def test_time_features_cyclic(self):
+        from brain.screen_model import time_features
+        import math
+        a = time_features(23.99); b = time_features(0.01)
+        # nearly adjacent in cyclic space
+        self.assertLess(abs(a[0] - b[0]) + abs(a[1] - b[1]), 0.1)
+
+    def test_numpy_screen_model_learns_transition(self):
+        import numpy as np
+        from brain.screen_model import _NumpyScreenModel, time_features
+        rng = np.random.RandomState(0); emb = 6; N = 200
+        cur = rng.randn(N, emb).astype(np.float32)
+        A = rng.randn(emb, emb).astype(np.float32) * 0.5   # learnable linear map
+        nxt = (cur @ A).astype(np.float32)
+        tf = np.array(time_features(12.0), np.float32)
+        X = np.concatenate([cur, np.tile(tf, (N, 1))], axis=1).astype(np.float32)
+        m = _NumpyScreenModel(emb_dim=emb, hidden=64, seed=1)
+
+        def mse():
+            return float(np.mean([(m.predict_next(cur[i], 12.0) - nxt[i]) ** 2
+                                  for i in range(N)]))
+        before = mse()
+        m.fit(X, nxt, epochs=200, lr=5e-3)
+        self.assertLess(mse(), before)
+
+    def test_factory_and_save_load(self):
+        import numpy as np
+        from brain.screen_model import make_screen_model, load_screen_model
+        m = make_screen_model(5, backend="numpy", hidden=16)
+        self.assertEqual(m.kind, "numpy")
+        X = np.random.RandomState(0).randn(30, 7).astype(np.float32)
+        Y = np.random.RandomState(1).randn(30, 5).astype(np.float32)
+        m.fit(X, Y, epochs=10)
+        base = Path(tempfile.mkdtemp()) / "screen_model"
+        m.save(base)
+        loaded = load_screen_model(base)
+        self.assertIsNotNone(loaded)
+        p1 = m.predict_next(np.zeros(5, np.float32), 12.0)
+        p2 = loaded.predict_next(np.zeros(5, np.float32), 12.0)
+        self.assertLess(float(np.abs(np.asarray(p1) - np.asarray(p2)).max()), 1e-4)
+
+
+class SequenceTrainerTests(unittest.TestCase):
+    def _mem_with_obs(self, n=60):
+        from brain.memory import Memory, OBSERVATION
+        import time as _t
+
+        class _Dense:
+            name = "d"; persistent = True; dim = 8
+            def encode_one(self, text):
+                import struct, hashlib
+                h = hashlib.sha256((text or "").encode()).digest()
+                return struct.pack("<I8f", 8, *[(h[i]/255.0)*2-1 for i in range(8)])
+            def from_bytes(self, blob):
+                import struct
+                k = struct.unpack("<I", blob[:4])[0]
+                return list(struct.unpack(f"<{k}f", blob[4:4+4*k]))
+
+        m = Memory(Path(tempfile.mkdtemp()) / "m.sqlite", backend=_Dense())
+        base = _t.time()
+        for i in range(n):
+            rid = m.store("screen", "activity", f"app{i%4} doing thing{i%3}",
+                          0.4, mem_type=OBSERVATION)
+            m.conn.execute("UPDATE episodes SET ts=? WHERE id=?", (base + i*30, rid))
+        m.conn.commit()
+        return m
+
+    def test_trainer_builds_pairs_and_trains(self):
+        from brain.sleep import ScreenSequenceTrainer
+        m = self._mem_with_obs(60)
+        ckpt = Path(tempfile.mkdtemp()) / "screen_model"
+        stats = ScreenSequenceTrainer(backend="numpy", epochs=20, min_pairs=20).run(
+            m, checkpoint=ckpt, log=lambda _x: None)
+        self.assertTrue(stats["trained"])
+        self.assertGreaterEqual(stats["pairs"], 20)
+        m.close()
+
+    def test_trainer_noops_on_nondense(self):
+        from brain.sleep import ScreenSequenceTrainer
+        from brain.memory import Memory, OBSERVATION
+        from brain.embeddings import TfidfBackend
+        m = Memory(Path(tempfile.mkdtemp()) / "m.sqlite", backend=TfidfBackend())
+        for i in range(60):
+            m.store("s", "activity", f"x{i}", 0.4, mem_type=OBSERVATION)
+        stats = ScreenSequenceTrainer(min_pairs=20).run(m, log=lambda _x: None)
+        self.assertFalse(stats["trained"])
+        m.close()
+
+
 class PresenceAndDedupTests(unittest.TestCase):
     def _cfg(self):
         from brain.config import Config

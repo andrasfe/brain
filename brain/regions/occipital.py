@@ -30,12 +30,18 @@ class Occipital(Region):
 
     def __init__(self, cfg, llm, embodiment, *,
                  describe_with_vision: bool = True,
-                 vision_model: str = ""):
+                 vision_model: str = "",
+                 screen_model=None, memory=None):
         super().__init__(cfg, llm)
         self.embodiment = embodiment
         self.describe_with_vision = describe_with_vision
         # Default to the reflex tier model unless overridden.
         self.vision_model = vision_model or cfg.models.get("reflex", "")
+        # Learned screen-sequence model (next-screen predictor) + the memory it
+        # embeds against, for novelty + anticipation signals. Optional.
+        self.screen_model = screen_model
+        self.memory = memory
+        self._last_prediction = None   # predicted embedding for THIS step
 
     def step(self, ws: Workspace) -> Broadcast | None:
         if self.embodiment is None:
@@ -67,11 +73,75 @@ class Occipital(Region):
         if described:
             content = f"{rendered}; vision: {described}"
 
+        # ── learned dynamics: novelty + anticipation (when a screen-sequence
+        # model is loaded and we can embed the current screen) ─────────────
+        novelty = None
+        anticipated = None
+        salience = 0.5
+        if self.screen_model is not None and self.memory is not None and described:
+            cur = self._embed(described)
+            if cur is not None:
+                from ..screen_model import cosine_distance, make_screen_model  # noqa: F401
+                # novelty: did this screen match what we predicted last step?
+                if self._last_prediction is not None:
+                    novelty = round(cosine_distance(self._last_prediction, cur), 3)
+                    # a surprising screen is more salient (grabs attention)
+                    salience = min(0.85, 0.5 + 0.4 * max(0.0, novelty - 0.3))
+                # anticipate the NEXT screen, render as "you usually do X next"
+                try:
+                    import time as _t
+                    hour = _t.localtime().tm_hour + _t.localtime().tm_min / 60.0
+                    pred = self.screen_model.predict_next(cur, hour)
+                    self._last_prediction = pred
+                    anticipated = self._nearest_observation(pred)
+                except Exception:
+                    self._last_prediction = None
+        if novelty is not None:
+            content += f"  (novelty={novelty})"
+        if anticipated:
+            content += f"  [likely next: {anticipated[:60]}]"
+
         return ws.post(Broadcast(
             source=self.name, kind="vision",
             content=content,
-            salience=0.5,
+            salience=salience,
             data={"frontmost_app": obs.frontmost_app,
                   "frame": obs.frame.path if obs.frame else None,
-                  "n_elements": len(obs.elements)},
+                  "n_elements": len(obs.elements),
+                  "novelty": novelty, "anticipated": anticipated},
         ))
+
+    def _embed(self, text: str):
+        bk = getattr(self.memory, "backend", None)
+        if bk is None or not getattr(bk, "persistent", False):
+            return None
+        try:
+            blob = bk.encode_one(text or "")
+            return bk.from_bytes(blob) if blob else None
+        except Exception:
+            return None
+
+    def _nearest_observation(self, pred_emb):
+        """Match the predicted next-embedding to the closest past observation's
+        text — a human-legible 'you usually do X next'."""
+        if self.memory is None:
+            return None
+        try:
+            from ..screen_model import cosine_distance
+            from ..memory import OBSERVATION
+            rows = self.memory.conn.execute(
+                "SELECT content, embedding FROM episodes WHERE mem_type=? "
+                "AND embedding IS NOT NULL ORDER BY ts DESC LIMIT 300",
+                (OBSERVATION,)).fetchall()
+            best, best_d = None, 1e9
+            bk = self.memory.backend
+            for r in rows:
+                v = bk.from_bytes(r["embedding"]) if r["embedding"] else None
+                if not v:
+                    continue
+                d = cosine_distance(pred_emb, v)
+                if d < best_d:
+                    best_d, best = d, r["content"]
+            return best if best_d < 0.5 else None
+        except Exception:
+            return None

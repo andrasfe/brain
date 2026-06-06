@@ -134,10 +134,12 @@ class Brain:
         self.occipital = None
         if self.embodiment is not None:
             emb_cfg = cfg.embodiment or {}
+            screen_model = self._load_screen_model(cfg, backend)
             self.occipital = Occipital(
                 cfg, self.llm, self.embodiment,
                 describe_with_vision=bool(emb_cfg.get("describe_with_vision", True)),
                 vision_model=str(emb_cfg.get("vision_model", "")),
+                screen_model=screen_model, memory=self.memory,
             )
             self._observe_every = int(emb_cfg.get("observe_every", 3))
 
@@ -158,6 +160,19 @@ class Brain:
             return None
         try:
             return load_forward_model(default_checkpoint(cfg.db_path))
+        except Exception:
+            return None
+
+    def _load_screen_model(self, cfg: Config, backend):
+        if not getattr(backend, "persistent", False):
+            return None
+        try:
+            from .screen_model import load_screen_model
+            from .sleep.sequence_trainer import default_checkpoint
+        except ImportError:
+            return None
+        try:
+            return load_screen_model(default_checkpoint(cfg.db_path))
         except Exception:
             return None
 
