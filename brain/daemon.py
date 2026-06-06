@@ -55,7 +55,7 @@ from brain.inputs import (  # noqa: E402
 from brain.inputs.classifier import ClassifierRules  # noqa: E402
 from brain.orchestrator import Brain  # noqa: E402
 from brain.observer import ScreenObserver  # noqa: E402
-from brain.presence import user_present  # noqa: E402
+from brain.presence import idle_seconds  # noqa: E402
 from brain.sleep import (  # noqa: E402
     Dreamer, Forgetter, ForwardModelTrainer, MoodRegulator, ScreenPurger,
     Scheduler, SkillPruner,
@@ -159,6 +159,8 @@ class BrainDaemon:
             self.observer = ScreenObserver(
                 cfg, brain.llm, brain.memory, brain.embodiment,
                 interval_seconds=float(cap_cfg.get("interval_seconds", 60)),
+                min_interval_seconds=float(cap_cfg.get("min_interval_seconds", 8)),
+                activity_window_seconds=float(cap_cfg.get("activity_window_seconds", 8)),
                 exclude_apps=cap_cfg.get("exclude_apps"),
                 vision_model=str(cap_cfg.get("vision_model", "")),
                 change_detect=bool(cap_cfg.get("change_detect", True)),
@@ -246,17 +248,19 @@ class BrainDaemon:
     def tick(self) -> None:
         self.tick_n += 1
 
-        # ── presence: is the user here? (idle / screensaver / lock) ─────────
+        # ── presence + activity: one idle read drives both ─────────────────
+        idle = None
         if self.observer is not None or self.presence_sleep:
-            p = user_present(self.away_threshold_s)
-            if p is not None:
-                self._user_present = p
+            idle = idle_seconds()
+            if idle is not None:
+                self._user_present = idle < self.away_threshold_s
 
         # ── screen observation — only while the user is present (when away
         # there's nothing but a lock screen to see, and that's sleep time).
+        # `idle` feeds the activity-settle trigger.
         if self.observer is not None and self._user_present is not False:
             try:
-                self.observer.maybe_capture()
+                self.observer.maybe_capture(idle=idle)
             except Exception as e:
                 self.log(f"[daemon] observer error: {e}")
 

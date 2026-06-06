@@ -75,6 +75,8 @@ def privacy_ok(cfg) -> "tuple[bool, str]":
 class ScreenObserver:
     def __init__(self, cfg, llm, memory, embodiment, *,
                  interval_seconds: float = 60.0,
+                 min_interval_seconds: float = 8.0,
+                 activity_window_seconds: float = 8.0,
                  exclude_apps: Optional[list] = None,
                  vision_model: str = "",
                  change_detect: bool = True,
@@ -83,7 +85,9 @@ class ScreenObserver:
         self.llm = llm
         self.memory = memory
         self.embodiment = embodiment
-        self.interval_seconds = interval_seconds
+        self.interval_seconds = interval_seconds          # fallback max interval
+        self.min_interval_seconds = min_interval_seconds  # debounce floor
+        self.activity_window_seconds = activity_window_seconds
         excludes = list(exclude_apps if exclude_apps is not None else _DEFAULT_EXCLUDE)
         self._exclude = {a.lower() for a in excludes}
         self.vision_model = vision_model or cfg.models.get("reflex", "")
@@ -146,11 +150,19 @@ class ScreenObserver:
         a = app.lower()
         return any(x in a for x in self._exclude)
 
-    def maybe_capture(self, *, force: bool = False) -> dict[str, Any]:
-        """Capture one observation if warranted + allowed. Adaptive cadence:
-        a baseline timer, an immediate trigger when the frontmost app changes,
-        and a perceptual-hash dedup that skips the expensive VLM+embed when the
-        screen hasn't meaningfully changed. Never raises."""
+    def maybe_capture(self, *, force: bool = False,
+                      idle: Optional[float] = None) -> dict[str, Any]:
+        """Capture one observation if warranted + allowed. Adaptive cadence,
+        multiple triggers (any fires, all gated by dedup + privacy):
+          - app-switch: frontmost app changed (immediate; bypasses debounce)
+          - activity-settle: input happened then just stopped (idle within
+            [1s, activity_window]) — lands the shot on the *result* of an action
+          - fallback timer: capture at least every `interval_seconds` even idle
+        A `min_interval_seconds` debounce floors the rate for the
+        activity/fallback triggers (app-switch and force bypass it). `idle` is
+        seconds-since-last-input (from the daemon's presence read); None ⇒ the
+        activity trigger is inert and we rely on app-switch + fallback.
+        Never raises."""
         if self._paused:
             return {"captured": False, "reason": "paused"}
         if not self.ok:
@@ -161,9 +173,17 @@ class ScreenObserver:
         now = self._time_fn()
         app_now = self._frontmost()
         app_switched = (app_now is not None and app_now != self._last_app)
-        due = (now - self._last_capture) >= self.interval_seconds
-        if not (force or due or app_switched):
-            return {"captured": False, "reason": "not due"}
+        elapsed = now - self._last_capture
+        if force or app_switched:
+            pass  # high-value triggers bypass the debounce
+        else:
+            if elapsed < self.min_interval_seconds:
+                return {"captured": False, "reason": "debounce"}
+            settled = (idle is not None
+                       and 1.0 <= idle <= self.activity_window_seconds)
+            fallback = elapsed >= self.interval_seconds
+            if not (settled or fallback):
+                return {"captured": False, "reason": "not due"}
 
         # Exclusion is checked on the cheap app read first — never even
         # screenshot a sensitive app.

@@ -2167,6 +2167,65 @@ class PresenceAndDedupTests(unittest.TestCase):
         self.assertEqual(r["trigger"], "app_switch")
         mem.close()
 
+    def test_activity_settle_triggers_capture(self):
+        from brain.observer import ScreenObserver
+        cfg = self._cfg()
+        emb, _ = self._obs_emb(app="Editor")
+        mem = self._mem(cfg)
+        llm = MagicMock(); llm.describe_image.return_value = "working"
+        clock = [0.0]
+        ob = ScreenObserver(cfg, llm, mem, emb, interval_seconds=9999,
+                            min_interval_seconds=8, activity_window_seconds=8,
+                            vision_model="vm", time_fn=lambda: clock[0])
+        ob._fingerprint = lambda p: None   # disable dedup
+        ob.maybe_capture(idle=2.0)         # first call: app-switch (None→Editor)
+        # past debounce, app unchanged, NOT due by fallback (9999s), but idle
+        # in the settle window → should capture on activity.
+        emb2, _ = self._obs_emb(app="Editor"); ob.embodiment = emb2
+        clock[0] += 20
+        r = ob.maybe_capture(idle=3.0)
+        self.assertTrue(r["captured"])
+        mem.close()
+
+    def test_no_capture_when_actively_typing_then_debounced(self):
+        from brain.observer import ScreenObserver
+        cfg = self._cfg()
+        emb, _ = self._obs_emb(app="Editor")
+        mem = self._mem(cfg)
+        llm = MagicMock(); llm.describe_image.return_value = "x"
+        clock = [0.0]
+        ob = ScreenObserver(cfg, llm, mem, emb, interval_seconds=9999,
+                            min_interval_seconds=8, activity_window_seconds=8,
+                            vision_model="vm", time_fn=lambda: clock[0])
+        ob._fingerprint = lambda p: None
+        ob.maybe_capture(idle=2.0)         # captures (first/app-switch)
+        emb2, _ = self._obs_emb(app="Editor"); ob.embodiment = emb2
+        clock[0] += 2                      # within debounce window
+        r = ob.maybe_capture(idle=0.2)     # mid-typing (idle<1) + debounced
+        self.assertFalse(r["captured"])
+        self.assertEqual(r["reason"], "debounce")
+        mem.close()
+
+    def test_idle_outside_window_no_activity_trigger(self):
+        from brain.observer import ScreenObserver
+        cfg = self._cfg()
+        emb, _ = self._obs_emb(app="Editor")
+        mem = self._mem(cfg)
+        llm = MagicMock(); llm.describe_image.return_value = "x"
+        clock = [0.0]
+        ob = ScreenObserver(cfg, llm, mem, emb, interval_seconds=9999,
+                            min_interval_seconds=8, activity_window_seconds=8,
+                            vision_model="vm", time_fn=lambda: clock[0])
+        ob._fingerprint = lambda p: None
+        ob.maybe_capture(idle=2.0)         # first capture
+        emb2, _ = self._obs_emb(app="Editor"); ob.embodiment = emb2
+        clock[0] += 30
+        # idle 60s = reading/away-ish, outside [1,8] window, fallback not due
+        r = ob.maybe_capture(idle=60.0)
+        self.assertFalse(r["captured"])
+        self.assertEqual(r["reason"], "not due")
+        mem.close()
+
     def test_presence_idle_parsing(self):
         from unittest import mock
         from brain import presence

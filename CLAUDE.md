@@ -323,10 +323,16 @@ either recovers ("Forget the cat; …") or drifts.
   refuses to run unless it can keep data local: `privacy_ok(cfg)` rejects a
   remote LLM/embedding endpoint (screen contents must never leave the machine);
   an app **exclusion list** skips sensitive apps entirely; `pause()/resume()`.
-  **Adaptive cadence**: a baseline `interval_seconds` timer (default 60s), an
-  immediate trigger on frontmost-app change, and a perceptual-hash **dedup**
-  (8×8 grayscale via built-in `sips`) that skips the expensive VLM+embed when
-  the screen is ~unchanged — so the effective rate tracks real screen activity.
+  **Adaptive cadence — multiple triggers (any fires), debounced + deduped:**
+  (1) **app-switch** (frontmost app changed — immediate, bypasses the
+  debounce); (2) **activity-settle** — you just acted then paused (idle within
+  `[1s, activity_window_seconds]`), so the shot lands on the *result* of an
+  action; (3) **fallback timer** — capture at least every `interval_seconds`
+  even with no input. `min_interval_seconds` floors the rate for the
+  activity/fallback paths. A perceptual-hash **dedup** (8×8 grayscale via
+  built-in `sips`) then skips the expensive VLM+embed when the screen is
+  ~unchanged. The daemon passes its single idle read in for the activity
+  trigger, so capture only fires on genuine state changes.
 
 - **`brain/presence.py`** — `idle_seconds()` (via `ioreg HIDIdleTime`, no deps)
   + `user_present(threshold)`. The daemon uses this to ground wake/sleep in
