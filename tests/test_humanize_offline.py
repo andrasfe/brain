@@ -1668,5 +1668,143 @@ class ReasoningModelHandlingTests(unittest.TestCase):
         self.assertIn("think", available)
 
 
+class EmbodimentIntegrationTests(unittest.TestCase):
+    """Brain ↔ afferent wiring, driven by afferent's offline FakeBackend.
+
+    Skips cleanly if afferent isn't installed so the suite still runs in
+    minimal environments (afferent is an optional dependency)."""
+
+    def setUp(self):
+        try:
+            import afferent  # noqa: F401
+        except ImportError:
+            self.skipTest("afferent not installed (optional embodiment dep)")
+
+    def _config(self, embodiment=None):
+        from brain.config import Config
+        tmp = Path(tempfile.mkdtemp())
+        return Config(
+            raw={}, api_key="", base_url="http://x", require_auth=False,
+            extra_headers={}, models={"reflex": "fake", "executive": "fake"},
+            timeout_seconds=10, max_retries=0,
+            sandbox_dir=tmp, db_path=tmp / "m.sqlite",
+            loop={}, memory={}, effectors={"filesystem": {"enabled": False}},
+            regions={}, embodiment=embodiment or {},
+        )
+
+    def _fake_embodiment(self, *, read_only=False, confirm=None):
+        from afferent import Embodiment, FakeBackend
+        from afferent.types import Observation, VisualElement
+        script = [
+            Observation(ts=0.0, frontmost_app="Editor",
+                        elements=[VisualElement("Save", (0.9, 0.05, 0.05, 0.03),
+                                                kind="button")]),
+            Observation(ts=1.0, frontmost_app="Editor", ocr_text="saved"),
+        ]
+        return Embodiment(FakeBackend(script=script), read_only=read_only,
+                          settle_ms=0, confirm=confirm,
+                          max_actions_per_min=100)
+
+    def test_effectors_advertise_screen_verbs_when_embodied(self):
+        from brain.effectors import Effectors
+        cfg = self._config()
+        eff = Effectors(cfg, embodiment=self._fake_embodiment())
+        avail = eff.available()
+        for v in ("look", "screen_click", "screen_type", "screen_key"):
+            self.assertIn(v, avail)
+
+    def test_no_screen_verbs_without_embodiment(self):
+        from brain.effectors import Effectors
+        eff = Effectors(self._config(), embodiment=None)
+        self.assertNotIn("look", eff.available())
+        self.assertNotIn("screen_click", eff.available())
+
+    def test_look_returns_screen_render(self):
+        from brain.effectors import Effectors
+        eff = Effectors(self._config(), embodiment=self._fake_embodiment())
+        ok, text = eff.execute("look", {})
+        self.assertTrue(ok)
+        self.assertIn("Editor", text)
+        self.assertIn("Save", text)
+
+    def test_screen_click_acts_and_grounds(self):
+        from brain.effectors import Effectors
+        emb = self._fake_embodiment()
+        eff = Effectors(self._config(), embodiment=emb)
+        ok, text = eff.execute("screen_click", {"x_pct": 0.9, "y_pct": 0.05})
+        self.assertTrue(ok)
+        # state_after rendered into the result text (world-model grounding)
+        self.assertIn("after:", text)
+        self.assertEqual(emb.backend.recorded_actions[0][0], "click_at")
+
+    def test_screen_click_read_only_refuses(self):
+        from brain.effectors import Effectors
+        emb = self._fake_embodiment(read_only=True)
+        eff = Effectors(self._config(), embodiment=emb)
+        ok, text = eff.execute("screen_click", {"x_pct": 0.5, "y_pct": 0.5})
+        self.assertFalse(ok)
+        self.assertEqual(emb.backend.recorded_actions, [])
+
+    def test_confirm_veto_blocks_screen_action(self):
+        from brain.effectors import Effectors
+        emb = self._fake_embodiment(confirm=lambda desc: False)
+        eff = Effectors(self._config(), embodiment=emb)
+        ok, _ = eff.execute("screen_type", {"text": "hi"})
+        self.assertFalse(ok)
+        self.assertEqual(emb.backend.recorded_actions, [])
+
+    def test_bad_args_rejected(self):
+        from brain.effectors import Effectors
+        eff = Effectors(self._config(), embodiment=self._fake_embodiment())
+        ok, msg = eff.execute("screen_click", {"x_pct": "nope"})
+        self.assertFalse(ok)
+        ok2, msg2 = eff.execute("screen_type", {})
+        self.assertFalse(ok2)
+
+    def test_occipital_posts_vision_broadcast(self):
+        from brain.regions.occipital import Occipital
+        cfg = self._config()
+        emb = self._fake_embodiment()
+        # no LLM needed: the fake observation carries elements → render_text
+        occ = Occipital(cfg, llm=MagicMock(), embodiment=emb,
+                        describe_with_vision=False)
+        ws = Workspace(task="x")
+        b = occ.step(ws)
+        self.assertIsNotNone(b)
+        self.assertEqual(b.kind, "vision")
+        self.assertIn("Editor", b.content)
+        self.assertEqual(b.data["frontmost_app"], "Editor")
+
+    def test_orchestrator_builds_embodiment_when_enabled(self):
+        from brain.orchestrator import Brain
+        cfg = self._config(embodiment={"enabled": True, "backend": "fake",
+                                       "read_only": True})
+        with patch("brain.orchestrator.LLM") as MockLLM, \
+             patch("brain.orchestrator.make_backend") as mk:
+            MockLLM.return_value = MagicMock()
+            from brain.embeddings import TfidfBackend
+            mk.return_value = TfidfBackend()
+            brain = Brain(cfg, confirm=lambda _m: True, log=lambda _m: None,
+                          humanize=False)
+            self.assertIsNotNone(brain.embodiment)
+            self.assertIsNotNone(brain.occipital)
+            self.assertIn("look", brain.effectors.available())
+            brain.close()
+
+    def test_orchestrator_disembodied_by_default(self):
+        from brain.orchestrator import Brain
+        cfg = self._config(embodiment={})   # disabled
+        with patch("brain.orchestrator.LLM") as MockLLM, \
+             patch("brain.orchestrator.make_backend") as mk:
+            MockLLM.return_value = MagicMock()
+            from brain.embeddings import TfidfBackend
+            mk.return_value = TfidfBackend()
+            brain = Brain(cfg, confirm=lambda _m: True, log=lambda _m: None,
+                          humanize=False)
+            self.assertIsNone(brain.embodiment)
+            self.assertIsNone(brain.occipital)
+            brain.close()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

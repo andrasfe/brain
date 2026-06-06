@@ -414,12 +414,35 @@ either recovers ("Forget the cat; …") or drifts.
     outcomes (ok → mild positive RPE, err → negative; repeated failures sting
     more). Updates reward_tone, valence, dominance.
 
+- **`brain/regions/occipital.py`** — VISUAL CORTEX (eyes). Active only when
+  embodied. Each rate-limited step calls `embodiment.observe()` and posts a
+  `vision` broadcast: `Observation.render_text()` directly when the backend
+  gives elements/OCR (no LLM), or a `llm.describe_image()` description of the
+  screenshot when the backend (e.g. macOS) gives only pixels. Eyes never gate
+  or act.
+
+- **Embodiment (`afferent`)** — the brain drives a real computer via the
+  standalone `afferent` PyPI package. `Brain._build_embodiment` makes an
+  `afferent.Embodiment` when `config.yaml embodiment.enabled` AND afferent is
+  importable (else None → disembodied; afferent is an optional dep, never
+  imported at module load). Backends: `fake` (scripted/offline-testable) or
+  `macos` (screencapture + cliclick). The afferent `SafetyGate` (read_only
+  default, confirm wired to the brain's confirm callback, rate limit, panic)
+  gates every hand action. `llm.describe_image()` provides vision input.
+
 - **`brain/effectors.py`** — the "motor cortex". Filesystem (`read_file`,
   `write_file`, `list_dir`), `shell`, `web_fetch`, plus internal `think`/`finish`.
-  **All effectors are confined to the sandbox dir** (`_resolve` rejects path
-  escapes). Shell prompts for confirmation by default. `available()` is gated by
-  `config.yaml` `effectors.*.enabled`, so disabling them yields a pure-reasoning
-  brain (used by the eval).
+  **All file/shell effectors are confined to the sandbox dir** (`_resolve`
+  rejects path escapes). Shell prompts for confirmation by default.
+  `available()` is gated by `config.yaml` `effectors.*.enabled`, so disabling
+  them yields a pure-reasoning brain (used by the eval).
+  **Embodiment effectors** (only when an `afferent.Embodiment` is attached):
+  `look` (eyes) and `screen_click` / `screen_type` / `screen_key` /
+  `screen_scroll` (hands) drive the real computer via afferent. These are NOT
+  sandbox-confined — they act on the host — so the afferent `SafetyGate`
+  (read-only default, confirm callback, rate limit) plus the basal ganglia
+  gate are the protection. Each is advertised only when the body's
+  `capabilities()` include it.
 
 - **`brain/orchestrator.py`** — `Brain` ties it together and runs the cognitive
   cycle described above. Logging is injected via a `log` callback; shell

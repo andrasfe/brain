@@ -91,6 +91,9 @@ class Config:
     # construct Config directly keep working. load_config always sets them.
     require_auth: bool = True
     extra_headers: dict[str, str] = field(default_factory=dict)
+    # Embodiment (afferent) — eyes + hands on the host computer. Empty/disabled
+    # by default. Defaulted so existing Config() callers keep working.
+    embodiment: dict[str, Any] = field(default_factory=dict)
 
     def model_for(self, region: str) -> str:
         """Resolve a region name to a concrete model id via its tier."""
@@ -173,4 +176,5 @@ def load_config(path: str | Path | None = None) -> Config:
         memory=raw.get("memory", {}),
         effectors=raw.get("effectors", {}),
         regions=raw.get("regions", {}),
+        embodiment=raw.get("embodiment", {}),
     )

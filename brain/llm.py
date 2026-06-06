@@ -70,6 +70,54 @@ class LLM:
                     time.sleep(1.5 * (attempt + 1))
         raise RuntimeError(f"LLM call failed after retries: {last_err}")
 
+    def describe_image(
+        self,
+        model: str,
+        prompt: str,
+        image_path: str,
+        *,
+        system: str = "You are a screen-reading assistant. Be concise and literal.",
+        temperature: float = 0.2,
+        max_tokens: int = 400,
+    ) -> str:
+        """Send a local image to a vision-capable model (OpenAI vision shape:
+        a content array with an image_url data URI). Used by the occipital
+        region to turn a screenshot into a textual percept. Returns "" on
+        failure rather than raising — vision is best-effort eyes, not a hard
+        dependency of a cognitive cycle."""
+        import base64
+        import mimetypes
+
+        try:
+            with open(image_path, "rb") as fh:
+                blob = fh.read()
+        except OSError:
+            return ""
+        mime = mimetypes.guess_type(image_path)[0] or "image/png"
+        data_uri = f"data:{mime};base64," + base64.b64encode(blob).decode("ascii")
+        payload = {
+            "model": model,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": data_uri}},
+                ]},
+            ],
+        }
+        for attempt in range(self.cfg.max_retries + 1):
+            try:
+                r = self._client.post("/chat/completions", json=payload)
+                r.raise_for_status()
+                msg = r.json()["choices"][0]["message"]
+                return (msg.get("content") or msg.get("reasoning_content") or "").strip()
+            except Exception:  # noqa: BLE001 — best-effort; eyes degrade quietly
+                if attempt < self.cfg.max_retries:
+                    time.sleep(1.0 * (attempt + 1))
+        return ""
+
     def chat_json(
         self,
         model: str,

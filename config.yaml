@@ -87,3 +87,19 @@ persona_path: "personas/alex.yaml"
 #   neutral | calm_morning | deadline_night | boring_afternoon |
 #   social_evening | sick_day
 scenario: "boring_afternoon"
+
+# Embodiment — eyes + hands on the host computer, via the `afferent` package
+# (pip install afferent). Disabled by default. When enabled, the brain gains
+# a `look` effector + an occipital region (eyes) and, if the backend supports
+# it, `screen_click` / `screen_type` / `screen_key` (hands).
+#   backend:  "fake" (scripted, safe) | "macos" (screencapture + cliclick)
+#   read_only: true = eyes only; hands refuse until set false (SAFE DEFAULT)
+embodiment:
+  enabled: false
+  backend: "macos"
+  read_only: true
+  max_actions_per_min: 20
+  settle_ms: 400
+  observe_every: 3            # occipital posts a vision broadcast every N steps
+  describe_with_vision: true  # describe screenshots via the vision model
+  vision_model: ""            # blank = reflex-tier model

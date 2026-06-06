@@ -23,7 +23,7 @@ from .config import Config
 
 class Effectors:
     def __init__(self, cfg: Config, confirm: Callable[[str], bool] | None = None,
-                 memory: Optional[Any] = None):
+                 memory: Optional[Any] = None, embodiment: Optional[Any] = None):
         self.cfg = cfg
         self.sandbox = cfg.sandbox_dir
         self.eff_cfg = cfg.effectors
@@ -31,6 +31,12 @@ class Effectors:
         self.confirm = confirm or (lambda _msg: True)
         # memory may be None during tests/eval — `remind_self` becomes a no-op.
         self.memory = memory
+        # embodiment is an afferent.Embodiment or None. When present, the
+        # `screen_*` effectors give the brain hands on the host computer.
+        # The afferent SafetyGate (read_only / confirm / rate limit) gates
+        # every action — this is defense-in-depth on top of the basal
+        # ganglia's go/no-go.
+        self.embodiment = embodiment
 
     # ── dispatch ──────────────────────────────────────────────────────────────
     def available(self) -> list[str]:
@@ -41,6 +47,19 @@ class Effectors:
             names += ["shell"]
         if self.eff_cfg.get("web", {}).get("enabled"):
             names += ["web_fetch"]
+        # Embodiment ("hands"): only advertise the verbs the attached body can
+        # actually do. `look` (eyes) is offered whenever an embodiment exists.
+        if self.embodiment is not None:
+            caps = self.embodiment.capabilities()
+            names += ["look"]
+            if "click" in caps:
+                names += ["screen_click"]
+            if "type" in caps:
+                names += ["screen_type"]
+            if "key" in caps:
+                names += ["screen_key"]
+            if "scroll" in caps:
+                names += ["screen_scroll"]
         names += ["think", "remind_self", "finish"]  # always-available internal effectors
         return names
 
@@ -53,6 +72,11 @@ class Effectors:
             "web_fetch": self._web_fetch,
             "think": self._think,
             "remind_self": self._remind_self,
+            "look": self._look,
+            "screen_click": self._screen_click,
+            "screen_type": self._screen_type,
+            "screen_key": self._screen_key,
+            "screen_scroll": self._screen_scroll,
         }.get(name)
         if fn is None:
             return False, f"unknown effector: {name}"
@@ -161,3 +185,66 @@ class Effectors:
             fires_after_ts=fires_after,
         )
         return True, f"reminder #{pid} registered ({trigger}: {pattern[:40]})"
+
+    # ── embodiment (eyes + hands via afferent) ──────────────────────────────────
+    @staticmethod
+    def _ar_text(res: Any) -> str:
+        """Render an afferent ActionResult into the (ok, text) the loop wants,
+        including any post-action screen state for world-model grounding."""
+        bits = [res.reason or res.action]
+        if res.steps is not None:
+            bits.append(f"steps={res.steps}")
+        if getattr(res, "state_after", None) is not None:
+            bits.append("after: " + res.state_after.render_text(limit=12))
+        return "; ".join(b for b in bits if b)
+
+    def _look(self, args: dict[str, Any]) -> tuple[bool, str]:
+        """Observe the screen (eyes). No side effects; always allowed."""
+        if self.embodiment is None:
+            return False, "look: no embodiment attached"
+        obs = self.embodiment.observe()
+        return True, obs.render_text(limit=20)
+
+    def _screen_click(self, args: dict[str, Any]) -> tuple[bool, str]:
+        if self.embodiment is None:
+            return False, "screen_click: no embodiment attached"
+        try:
+            x = float(args["x_pct"]); y = float(args["y_pct"])
+        except (KeyError, TypeError, ValueError):
+            return False, "screen_click needs numeric x_pct, y_pct in [0,1]"
+        res = self.embodiment.click_at(
+            x, y, button=args.get("button", "left"), count=int(args.get("count", 1)))
+        return res.ok, self._ar_text(res)
+
+    def _screen_type(self, args: dict[str, Any]) -> tuple[bool, str]:
+        if self.embodiment is None:
+            return False, "screen_type: no embodiment attached"
+        text = args.get("text")
+        if not isinstance(text, str) or not text:
+            return False, "screen_type needs non-empty 'text'"
+        res = self.embodiment.type_text(
+            text, secret=bool(args.get("secret", False)),
+            append_enter=bool(args.get("append_enter", False)))
+        return res.ok, self._ar_text(res)
+
+    def _screen_key(self, args: dict[str, Any]) -> tuple[bool, str]:
+        if self.embodiment is None:
+            return False, "screen_key: no embodiment attached"
+        combo = args.get("combo") or args.get("key")
+        if not isinstance(combo, str) or not combo:
+            return False, "screen_key needs 'combo' (e.g. 'cmd+c', 'return')"
+        res = self.embodiment.key(combo)
+        return res.ok, self._ar_text(res)
+
+    def _screen_scroll(self, args: dict[str, Any]) -> tuple[bool, str]:
+        if self.embodiment is None:
+            return False, "screen_scroll: no embodiment attached"
+        try:
+            amount = int(args["amount"])
+        except (KeyError, TypeError, ValueError):
+            return False, "screen_scroll needs integer 'amount'"
+        at = None
+        if "x_pct" in args and "y_pct" in args:
+            at = (float(args["x_pct"]), float(args["y_pct"]))
+        res = self.embodiment.scroll(amount, at_pct=at)
+        return res.ok, self._ar_text(res)

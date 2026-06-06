@@ -44,6 +44,7 @@ from .regions import (
     BasalGanglia,
     Broca,
     Cerebellum,
+    Occipital,
     DefaultMode,
     Hippocampus,
     Interoception,
@@ -84,9 +85,15 @@ class Brain:
         # embedding space. The PFC consults it to ground its expected_result
         # predictions; the orchestrator writes a row after every action.
         self.world_model = WorldModelStore(cfg.db_path, backend=backend)
+        # Embodiment (afferent) — eyes + hands on the host computer. Optional:
+        # built only when configured AND the afferent package is importable, so
+        # the brain runs fine without it. Construction is isolated in a helper.
+        self.embodiment = self._build_embodiment(cfg, confirm)
         # Effectors get a memory handle so `remind_self` can register
-        # prospective items the hippocampus will surface later.
-        self.effectors = Effectors(cfg, confirm=confirm, memory=self.memory)
+        # prospective items the hippocampus will surface later, plus the
+        # embodiment so the `screen_*` / `look` effectors light up.
+        self.effectors = Effectors(cfg, confirm=confirm, memory=self.memory,
+                                    embodiment=self.embodiment)
         self.humanize = humanize
         self.seed = seed
 
@@ -117,15 +124,56 @@ class Brain:
         self.cerebellum = Cerebellum(cfg, self.llm,
                                        world_model=self.world_model)
 
+        # Occipital (eyes) — only when embodied.
+        self.occipital = None
+        if self.embodiment is not None:
+            emb_cfg = cfg.embodiment or {}
+            self.occipital = Occipital(
+                cfg, self.llm, self.embodiment,
+                describe_with_vision=bool(emb_cfg.get("describe_with_vision", True)),
+                vision_model=str(emb_cfg.get("vision_model", "")),
+            )
+            self._observe_every = int(emb_cfg.get("observe_every", 3))
+
         # Seed memory with persona priors
         if persona is not None:
             self._seed_persona_memory(persona)
+
+    def _build_embodiment(self, cfg: Config, confirm):
+        """Construct an afferent Embodiment from config, or return None.
+
+        None whenever embodiment is disabled OR afferent isn't installed —
+        the brain stays fully functional either way (the `screen_*`/`look`
+        effectors simply don't appear in `available()`)."""
+        emb_cfg = cfg.embodiment or {}
+        if not emb_cfg.get("enabled"):
+            return None
+        try:
+            from afferent import Embodiment, FakeBackend, MacOSBackend
+        except ImportError:
+            self.log("  ⚠ embodiment enabled but `afferent` not installed "
+                     "(pip install afferent) — running disembodied")
+            return None
+        backend_name = str(emb_cfg.get("backend", "fake")).lower()
+        backend = MacOSBackend() if backend_name == "macos" else FakeBackend()
+        return Embodiment(
+            backend,
+            read_only=bool(emb_cfg.get("read_only", True)),
+            confirm=confirm,
+            max_actions_per_min=float(emb_cfg.get("max_actions_per_min", 20)),
+            settle_ms=int(emb_cfg.get("settle_ms", 400)),
+        )
 
     def close(self) -> None:
         self.llm.close()
         self.memory.close()
         self.skills.close()
         self.world_model.close()
+        if self.embodiment is not None:
+            try:
+                self.embodiment.close()
+            except Exception:
+                pass
 
     def _seed_persona_memory(self, persona: Persona) -> None:
         for seed in persona.memory_seeds():
@@ -180,6 +228,13 @@ class Brain:
                         ws.affect.update("world", step, s.affect_delta,
                                           smoothing=0.8)
                 self.interoception.step(ws)
+
+            # ── eyes (rate-limited) — see the screen when embodied ─────────
+            if self.occipital is not None and (
+                    step == 1 or step % self._observe_every == 0):
+                v = self.occipital.step(ws)
+                if v:
+                    self.log(f"  👁 vision: {v.content[:80]}")
 
             # ── recall (rate-limited) ──────────────────────────────────────
             if step == 1 or step % _RECALL_EVERY == 0:
