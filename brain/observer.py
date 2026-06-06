@@ -122,10 +122,14 @@ class ScreenObserver:
                  activity_window_seconds: float = 8.0,
                  exclude_apps: Optional[list] = None,
                  vision_model: str = "",
+                 vision_model_strong: str = "",
                  change_detect: bool = True,
                  visual_embedder=None,
                  time_fn=time.monotonic):
         self.visual_embedder = visual_embedder
+        # Strong (executive) vision model used on the informative frames
+        # (app-switch); the fast reflex model handles routine frames.
+        self.vision_model_strong = vision_model_strong
         self.cfg = cfg
         self.llm = llm
         self.memory = memory
@@ -289,8 +293,15 @@ class ScreenObserver:
                 from .knowledge import render_rules
                 rules = render_rules(self.cfg.db_path)
                 app_known = app or "an unknown app"
+                # Hybrid vision: spend the smart (executive) model only on the
+                # informative frames — app-switches — where reading the new
+                # screen correctly matters most. Routine frames use the fast
+                # reflex model. Falls back to fast if no strong model set.
+                model = (self.vision_model_strong
+                         if (app_switched and self.vision_model_strong)
+                         else self.vision_model)
                 raw = self.llm.describe_image(
-                    self.vision_model,
+                    model,
                     f"The macOS frontmost application is '{app_known}' (read from "
                     "the menu bar — this is GROUND TRUTH; do not name a different "
                     "app).\n"

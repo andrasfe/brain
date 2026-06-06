@@ -187,6 +187,8 @@ class BrainDaemon:
                 activity_window_seconds=float(cap_cfg.get("activity_window_seconds", 8)),
                 exclude_apps=cap_cfg.get("exclude_apps"),
                 vision_model=str(cap_cfg.get("vision_model", "")),
+                vision_model_strong=str(cap_cfg.get("vision_model_strong",
+                                                    cfg.models.get("executive", ""))),
                 change_detect=bool(cap_cfg.get("change_detect", True)),
                 visual_embedder=getattr(brain, "visual_embedder", None),
             )

@@ -2196,6 +2196,42 @@ class ScreenReadingSkillTests(unittest.TestCase):
         self.assertIn("menu bar", prompt.lower())
         mem.close()
 
+    def test_hybrid_vision_uses_strong_model_on_app_switch(self):
+        from brain.observer import ScreenObserver
+        from brain.memory import Memory
+        from brain.embeddings import TfidfBackend
+        from brain.config import Config
+        from afferent import Embodiment, FakeBackend
+        from afferent.types import Observation, Frame
+        tmp = Path(tempfile.mkdtemp())
+        p1 = tmp / "afferent_frame_a.png"; p1.write_bytes(b"png1")
+        p2 = tmp / "afferent_frame_b.png"; p2.write_bytes(b"png2")
+        cfg = Config(raw={"sandbox_dir": str(tmp)}, api_key="",
+                     base_url="http://localhost:1234/v1", require_auth=False,
+                     extra_headers={}, models={"reflex": "fast", "executive": "smart"},
+                     timeout_seconds=10, max_retries=0, sandbox_dir=tmp,
+                     db_path=tmp / "m.sqlite", loop={},
+                     memory={"embedding_backend": "openrouter"}, effectors={},
+                     regions={})
+        emb = Embodiment(FakeBackend(script=[
+            Observation(ts=0.0, frontmost_app="LM Studio",
+                        frame=Frame(id="a", ts=0.0, path=str(p1))),
+            Observation(ts=1.0, frontmost_app="LM Studio",
+                        frame=Frame(id="b", ts=1.0, path=str(p2))),
+        ]), read_only=True)
+        mem = Memory(cfg.db_path, backend=TfidfBackend())
+        llm = MagicMock(); llm.describe_image.return_value = "doing things"
+        ob = ScreenObserver(cfg, llm, mem, emb, interval_seconds=0,
+                            vision_model="fast", vision_model_strong="smart")
+        ob._fingerprint = lambda _p: None
+        # first frame = first-ever app (a switch from None) → strong model
+        ob.maybe_capture(force=True)
+        self.assertEqual(llm.describe_image.call_args[0][0], "smart")
+        # same app again, forced (no app-switch) → fast model
+        ob.maybe_capture(force=True)
+        self.assertEqual(llm.describe_image.call_args[0][0], "fast")
+        mem.close()
+
 
 class VisionTeacherTests(unittest.TestCase):
     def test_teacher_appends_rules_from_descriptions(self):

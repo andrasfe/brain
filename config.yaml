@@ -132,7 +132,12 @@ capture:
   min_interval_seconds: 8     # debounce floor (activity/fallback; app-switch bypasses)
   activity_window_seconds: 8  # idle <= this (and >= 1s) counts as "just settled"
   change_detect: true         # skip the VLM+embed when the screen is ~unchanged
-  vision_model: ""            # blank = reflex-tier model
+  # Hybrid vision: the fast reflex model reads routine frames; the strong
+  # executive model is spent only on app-switches (the informative moments
+  # where reading the new screen correctly matters most). Both are vision-
+  # capable in LM Studio; the reflex one is just faster.
+  vision_model: ""            # routine frames — blank = reflex-tier model
+  vision_model_strong: ""     # app-switch frames — blank = executive-tier model
   # Screen-state representation for the sequence model:
   #   "none"   — embed the text description (EmbeddingGemma) [default]
   #   "dinov2" — embed the screenshot with local DINOv2 (needs torch; no uploads)
