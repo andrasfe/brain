@@ -108,7 +108,7 @@ scenario: "boring_afternoon"
 #   backend:  "fake" (scripted, safe) | "macos" (screencapture + cliclick)
 #   read_only: true = eyes only; hands refuse until set false (SAFE DEFAULT)
 embodiment:
-  enabled: true
+  enabled: false
   backend: "macos"
   read_only: true
   max_actions_per_min: 20
@@ -124,7 +124,7 @@ embodiment:
 # enabled (it uses the eyes; read_only is fine). The daemon runs capture; the
 # screen_purger (NREM) enforces retention. Off by default.
 capture:
-  enabled: true
+  enabled: false
   # Triggers (any fires): app-switch (immediate) | activity-settle (you just
   # acted, then paused — idle within [1s, activity_window_seconds]) | fallback
   # timer (capture at least every interval_seconds even with no input).

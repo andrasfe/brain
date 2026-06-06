@@ -19,6 +19,18 @@ memory.sqlite3
 workspace/
 eval/results/
 
+# runtime artifacts written next to the memory DB by the daemon
+daemon.log
+status.json
+status.json.tmp
+forward_model.npz
+forward_model.json
+forward_model.mlx.safetensors
+screen_model.npz
+screen_model.json
+screen_model.mlx.safetensors
+screen_reading_learned.txt
+
 # one-off helper launcher (not part of the project)
 init_git.command
 
