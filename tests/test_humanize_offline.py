@@ -2147,6 +2147,46 @@ class ScreenObserverTests(unittest.TestCase):
         mem.close()
 
 
+class EmbodimentSelfTestTests(unittest.TestCase):
+    def test_selftest_only_moves_never_clicks_or_types(self):
+        from brain.embodiment_selftest import run_selftest
+        from afferent import Embodiment, FakeBackend
+        from afferent.types import Observation
+        be = FakeBackend(script=[Observation(ts=0.0, frontmost_app="Finder")])
+        em = Embodiment(be, read_only=False, settle_ms=0)
+        rep = run_selftest(em, moves=[(0.5, 0.5), (0.4, 0.4)], log=lambda _m: None)
+        self.assertTrue(rep["eyes_ok"])
+        self.assertEqual(rep["moved_ok"], 2)
+        verbs = [a[0] for a in be.recorded_actions]
+        self.assertEqual(set(verbs), {"move_to"})       # ONLY moves
+        self.assertNotIn("click_at", verbs)
+        self.assertNotIn("type_text", verbs)
+        self.assertNotIn("key", verbs)
+
+    def test_selftest_eyes_only_without_pointer(self):
+        from brain.embodiment_selftest import run_selftest
+        from afferent import Embodiment, FakeBackend
+        from afferent.types import Observation
+        # capabilities without 'click' → eyes-only, no moves attempted
+        be = FakeBackend(script=[Observation(ts=0.0, frontmost_app="X")],
+                         capabilities={"pixels"})
+        em = Embodiment(be, read_only=False, settle_ms=0)
+        rep = run_selftest(em, log=lambda _m: None)
+        self.assertTrue(rep["eyes_ok"])
+        self.assertEqual(rep["moves"], [])
+        self.assertEqual(be.recorded_actions, [])
+
+    def test_selftest_reports_refusal_when_readonly(self):
+        from brain.embodiment_selftest import run_selftest
+        from afferent import Embodiment, FakeBackend
+        from afferent.types import Observation
+        be = FakeBackend(script=[Observation(ts=0.0, frontmost_app="X")])
+        em = Embodiment(be, read_only=True)   # hands refuse
+        rep = run_selftest(em, moves=[(0.5, 0.5)], log=lambda _m: None)
+        self.assertEqual(rep["moved_ok"], 0)
+        self.assertEqual(be.recorded_actions, [])  # nothing executed
+
+
 class VisualEmbedTests(unittest.TestCase):
     def test_make_visual_embedder_none(self):
         from brain.vision_embed import make_visual_embedder

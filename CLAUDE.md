@@ -104,6 +104,10 @@ python3 -m brain.consolidator --dry-run          # cluster + tag, no LLM
 # train the learned forward model (JEPA-lite) on world-model triples
 python3 -m brain.sleep.forward_model_trainer --epochs 300 --min-rows 40
 
+# learned models
+python3 -m brain.sleep.sequence_trainer    # (via daemon NREM) next-screen predictor
+python3 -m brain.embodiment_selftest        # prove eyes+hands safely (mouse-move only)
+
 # brain status — snapshot, JSON, or an auto-refreshing web dashboard
 python3 -m brain.status                 # terminal snapshot
 python3 -m brain.status --json          # raw JSON
