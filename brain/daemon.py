@@ -187,8 +187,7 @@ class BrainDaemon:
                 activity_window_seconds=float(cap_cfg.get("activity_window_seconds", 8)),
                 exclude_apps=cap_cfg.get("exclude_apps"),
                 vision_model=str(cap_cfg.get("vision_model", "")),
-                vision_model_strong=str(cap_cfg.get("vision_model_strong",
-                                                    cfg.models.get("executive", ""))),
+                vision_model_strong=str(cap_cfg.get("vision_model_strong", "")),
                 change_detect=bool(cap_cfg.get("change_detect", True)),
                 visual_embedder=getattr(brain, "visual_embedder", None),
             )
@@ -287,7 +286,12 @@ class BrainDaemon:
         # `idle` feeds the activity-settle trigger.
         if self.observer is not None and self._user_present is not False:
             try:
-                self.observer.maybe_capture(idle=idle)
+                res = self.observer.maybe_capture(idle=idle)
+                if res and res.get("captured"):
+                    self.log(
+                        f"  👁 capture [{res.get('trigger')}] "
+                        f"{res.get('model_tier')} model "
+                        f"({res.get('model') or 'none'}) → {res.get('content')}")
             except Exception as e:
                 self.log(f"[daemon] observer error: {e}")
 

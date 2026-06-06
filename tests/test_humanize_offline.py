@@ -2232,6 +2232,23 @@ class ScreenReadingSkillTests(unittest.TestCase):
         self.assertEqual(llm.describe_image.call_args[0][0], "fast")
         mem.close()
 
+    def test_blank_strong_model_falls_back_to_executive_tier(self):
+        # Regression: a blank vision_model_strong must resolve to the executive
+        # tier, not stay empty (which would silently use the fast model on
+        # app-switches). Mirrors the vision_model → reflex fallback.
+        from brain.observer import ScreenObserver
+        from brain.config import Config
+        cfg = Config(raw={}, api_key="", base_url="http://localhost:1234/v1",
+                     require_auth=False, extra_headers={},
+                     models={"reflex": "fast", "executive": "smart"},
+                     timeout_seconds=10, max_retries=0, sandbox_dir=Path(tempfile.mkdtemp()),
+                     db_path=Path(tempfile.mkdtemp()) / "m.sqlite", loop={},
+                     memory={"embedding_backend": "openrouter"}, effectors={}, regions={})
+        ob = ScreenObserver(cfg, MagicMock(), MagicMock(), None,
+                            interval_seconds=0, vision_model="", vision_model_strong="")
+        self.assertEqual(ob.vision_model, "fast")
+        self.assertEqual(ob.vision_model_strong, "smart")
+
 
 class VisionTeacherTests(unittest.TestCase):
     def test_teacher_appends_rules_from_descriptions(self):
@@ -2442,6 +2459,17 @@ class VisionCleanupTests(unittest.TestCase):
     def test_empty(self):
         from brain.observer import clean_vision_text
         self.assertEqual(clean_vision_text(""), "")
+
+    def test_strips_markdown_label_prefix(self):
+        # Regression: the strong (qwen) model leaked a "**Final Polish:**"
+        # label + bold markup + "the user is" nicety into the activity label.
+        from brain.observer import clean_vision_text
+        out = clean_vision_text(
+            '**Final Polish:** "The user is browsing messages in the #general channel."')
+        self.assertEqual(out, "Browsing messages in the #general channel.")
+        self.assertNotIn("*", out)
+        self.assertNotIn("Final Polish", out)
+        self.assertNotIn("The user is", out)
 
 
 class ScreenSequenceModelTests(unittest.TestCase):

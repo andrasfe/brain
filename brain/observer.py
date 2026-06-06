@@ -61,6 +61,22 @@ _NICETY_RE = re.compile(
 )
 
 
+# Strip a leading label like "**Final Polish:**", "Answer:", "Final:" that
+# reasoning models prepend to their conclusion line.
+_LABEL_RE = re.compile(
+    r"^(final polish|final answer|final|answer|conclusion|output|response|"
+    r"result|tl;?dr|summary)\s*:?\s*",
+    re.IGNORECASE,
+)
+
+
+def _strip_markup(line: str) -> str:
+    """Remove markdown emphasis + a leading label prefix + surrounding quotes."""
+    line = line.replace("**", "").replace("__", "").strip().strip('"').strip("'")
+    line = _LABEL_RE.sub("", line).strip().strip('"').strip("'")
+    return line
+
+
 def clean_vision_text(text: str) -> str:
     """Reduce a (possibly reasoning-laden) vision-model reply to one clean
     activity label. Reasoning models put the actual answer LAST (after their
@@ -72,16 +88,17 @@ def clean_vision_text(text: str) -> str:
     lines = []
     for raw in text.split("\n"):
         line = re.sub(r"^\s*(\d+[.)]|[-*+])\s+", "", raw).strip().strip('"').strip("'")
+        line = _strip_markup(line)
         if line:
             lines.append(line)
     # Prefer the LAST substantive non-preamble line (the conclusion).
     for line in reversed(lines):
         if len(line) >= 8 and not _PREAMBLE_RE.match(line):
-            line = _NICETY_RE.sub("", line).strip()
+            line = _NICETY_RE.sub("", _strip_markup(line)).strip()
             return (line[0].upper() + line[1:])[:200] if line else line
     # Fallback: sentence-split the whole blob, last non-preamble sentence.
     for c in reversed(re.split(r"(?<=[.!?])\s+", " ".join(lines))):
-        c = c.strip()
+        c = _strip_markup(c.strip())
         if len(c) >= 8 and not _PREAMBLE_RE.match(c):
             return c[:200]
     return (" ".join(lines))[:200]
@@ -128,8 +145,9 @@ class ScreenObserver:
                  time_fn=time.monotonic):
         self.visual_embedder = visual_embedder
         # Strong (executive) vision model used on the informative frames
-        # (app-switch); the fast reflex model handles routine frames.
-        self.vision_model_strong = vision_model_strong
+        # (app-switch); the fast reflex model handles routine frames. Blank
+        # falls back to the executive tier (mirrors vision_model → reflex).
+        self.vision_model_strong = vision_model_strong or cfg.models.get("executive", "")
         self.cfg = cfg
         self.llm = llm
         self.memory = memory
@@ -288,6 +306,7 @@ class ScreenObserver:
                 img_blob = None
 
         description = ""
+        model = ""
         try:
             if path and self.vision_model:
                 from .knowledge import render_rules
@@ -332,7 +351,10 @@ class ScreenObserver:
         )
         self.captured += 1
         return {"captured": True, "app": app, "content": content[:120],
-                "trigger": "app_switch" if app_switched else "timer"}
+                "trigger": "app_switch" if app_switched else "timer",
+                "model": model,
+                "model_tier": ("strong" if model and model == self.vision_model_strong
+                               else "fast")}
 
     def stats(self) -> dict[str, Any]:
         return {"captured": self.captured, "skipped": self.skipped,
