@@ -2147,6 +2147,63 @@ class ScreenObserverTests(unittest.TestCase):
         mem.close()
 
 
+class RLCreditAssignmentTests(unittest.TestCase):
+    def _skills(self):
+        from brain.skills import SkillStore
+        return SkillStore(Path(tempfile.mkdtemp()) / "s.sqlite")
+
+    def test_reinforce_updates_value(self):
+        s = self._skills()
+        sig = "g"
+        s.consolidate(sig, "shell", {"command": "ls"}, ok=True)
+        s.reinforce(sig, "shell", {"command": "ls"}, return_value=1.0, alpha=0.5)
+        sk = s.list_for(sig)[0]
+        self.assertGreater(sk.value, 0.0)
+        s.close()
+
+    def test_reinforce_noop_on_unknown_skill(self):
+        s = self._skills()
+        # should not raise / create rows
+        s.reinforce("nope", "shell", {"command": "x"}, 1.0)
+        self.assertEqual(s.list_for("nope"), [])
+        s.close()
+
+    def test_discounted_credit_reaches_earlier_action(self):
+        """A setup action with neutral immediate reward gets positive value
+        because a later action in the chain succeeded — temporal credit."""
+        from brain.orchestrator import Brain
+        from brain.config import Config
+        from brain.workspace import Workspace
+        tmp = Path(tempfile.mkdtemp())
+        cfg = Config(raw={}, api_key="", base_url="http://x", require_auth=False,
+                     extra_headers={}, models={"reflex": "x", "executive": "y"},
+                     timeout_seconds=10, max_retries=0, sandbox_dir=tmp,
+                     db_path=tmp / "m.sqlite", loop={}, memory={}, effectors={},
+                     regions={})
+        with patch("brain.orchestrator.LLM") as MockLLM, \
+             patch("brain.orchestrator.make_backend") as mk:
+            MockLLM.return_value = MagicMock()
+            from brain.embeddings import TfidfBackend
+            mk.return_value = TfidfBackend()
+            brain = Brain(cfg, confirm=lambda _m: True, log=lambda _m: None,
+                          humanize=False)
+            # two known skills so reinforce can find them
+            brain.skills.consolidate("g", "read_file", {"path": "a"}, ok=True)
+            brain.skills.consolidate("g", "write_file", {"path": "b"}, ok=True)
+            ws = Workspace(task="t")
+            # setup action: neutral immediate reward; payoff action: +1
+            ws.trajectory = [("g", "read_file", {"path": "a"}, 0.0),
+                             ("g", "write_file", {"path": "b"}, 1.0)]
+            brain._assign_credit(ws, gamma=0.9, alpha=0.5)
+            setup = [s for s in brain.skills.list_for("g")
+                     if s.effector == "read_file"][0]
+            payoff = [s for s in brain.skills.list_for("g")
+                      if s.effector == "write_file"][0]
+            self.assertGreater(setup.value, 0.0)     # earlier action got credit
+            self.assertGreater(payoff.value, setup.value)
+            brain.close()
+
+
 class VisionCleanupTests(unittest.TestCase):
     def test_strips_reasoning_preamble(self):
         from brain.observer import clean_vision_text

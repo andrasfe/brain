@@ -86,6 +86,9 @@ class Workspace:
         # tracing only).
         self.last_habit_signature: Optional[str] = None
         self.habit_fired: bool = False  # True if this cycle's action came from cache
+        # RL: per-run trajectory of (signature, effector, args, reward) for
+        # temporal credit assignment at episode end.
+        self.trajectory: list = []
 
     # ── posting / reading ────────────────────────────────────────────────────
     def post(self, b: Broadcast) -> Broadcast:

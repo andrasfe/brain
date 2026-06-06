@@ -163,6 +163,20 @@ class Brain:
         except Exception:
             return None
 
+    def _assign_credit(self, ws, gamma: float = 0.9, alpha: float = 0.3) -> None:
+        """Backward discounted returns over ws.trajectory → SkillStore.reinforce.
+        G_t = r_t + gamma·G_{t+1}; each step's value is nudged toward its G_t."""
+        traj = getattr(ws, "trajectory", None)
+        if not traj:
+            return
+        g = 0.0
+        try:
+            for sig, eff, args, r in reversed(traj):
+                g = float(r) + gamma * g
+                self.skills.reinforce(sig, eff, args, g, alpha=alpha)
+        except Exception as e:  # noqa: BLE001 — learning must never break a run
+            self.log(f"  ⚠ credit assignment skipped: {type(e).__name__}: {e}")
+
     def _load_screen_model(self, cfg: Config, backend):
         if not getattr(backend, "persistent", False):
             return None
@@ -373,8 +387,13 @@ class Brain:
                     # The cached habit failed — decay its confidence so the
                     # next encounter falls back to System-2.
                     self.skills.punish(habit_proposal["_skill_id"])
+                _r = 0.0
                 if self.humanize:
-                    self.vta.step(ws)
+                    _vb = self.vta.step(ws)
+                    _r = float(_vb.data.get("rpe", 0.0)) if _vb else 0.0
+                else:
+                    _r = 0.1 if ok else -0.1
+                ws.trajectory.append((sig, eff, args, _r))
                 self.hippocampus.consolidate(
                     ws, kind="action",
                     content=f"(habit) {eff}({args}) -> "
@@ -493,8 +512,12 @@ class Brain:
                                       smoothing=0.7)
                 ws.last_prediction = None  # consumed
 
+                _r = 0.0
                 if self.humanize:
-                    self.vta.step(ws)
+                    _vb = self.vta.step(ws)
+                    _r = float(_vb.data.get("rpe", 0.0)) if _vb else 0.0
+                else:
+                    _r = 0.1 if ok else -0.1
 
                 # ── skill compilation (System-2 → System-1) ──
                 # Every action contributes to the skill cache: successes raise
@@ -505,6 +528,7 @@ class Brain:
                 sig = signature_from_percept(
                     (percept.data if percept else {}) or {}, ws.interrupt)
                 self.skills.consolidate(sig, eff, args, ok, outcome=result)
+                ws.trajectory.append((sig, eff, args, _r))
 
                 # ── world-model observation (LeCun-style passive learning) ──
                 # Salience scaled by surprise so high-prediction-error
@@ -536,6 +560,12 @@ class Brain:
         answer = self.broca.step(ws)
         self.hippocampus.consolidate(ws, kind="outcome",
                                       content=answer[:500], salience=0.7)
+
+        # ── RL: temporal credit assignment over this run's trajectory ──────
+        # Discounted Monte-Carlo returns flow backward, so an action that set
+        # up a later success gets credit even though its own immediate reward
+        # was neutral. Updates SkillStore values (the "is it worth it" signal).
+        self._assign_credit(ws)
 
         # End-of-task consolidation pass: extract recurring patterns from
         # recent episodic rows into durable semantic facts. Small and cheap

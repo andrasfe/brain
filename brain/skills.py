@@ -65,6 +65,7 @@ class Skill:
     successes: int
     last_used: float
     last_outcome: str
+    value: float = 0.0   # RL value — discounted return credited to this skill
 
     @property
     def success_rate(self) -> float:
@@ -100,6 +101,10 @@ class SkillStore:
             );
             CREATE INDEX IF NOT EXISTS idx_skills_sig ON skills(signature);
         """)
+        # Additive migration: RL value column (discounted return).
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(skills)").fetchall()}
+        if "value" not in cols:
+            self.conn.execute("ALTER TABLE skills ADD COLUMN value REAL NOT NULL DEFAULT 0")
         self.conn.commit()
 
     # ── lookup ──────────────────────────────────────────────────────────────
@@ -128,9 +133,12 @@ class SkillStore:
                 successes=int(row["successes"]),
                 last_used=float(row["last_used"]),
                 last_outcome=row["last_outcome"],
+                value=float(row["value"]) if "value" in row.keys() else 0.0,
             )
             if s.is_fireable(min_uses=min_uses, min_conf=min_conf):
-                if best is None or s.confidence > best.confidence:
+                # Among fireable skills prefer higher confidence, breaking ties
+                # toward higher learned value (the RL "worth it" signal).
+                if best is None or (s.confidence, s.value) > (best.confidence, best.value):
                     best = s
         return best
 
@@ -205,6 +213,27 @@ class SkillStore:
                           (new_conf, skill_id))
         self.conn.commit()
 
+    # ── reinforcement learning (temporal credit assignment) ─────────────────
+    def reinforce(self, signature: str, effector: str, args: dict,
+                  return_value: float, alpha: float = 0.3) -> None:
+        """TD/Monte-Carlo value update: nudge this skill's value toward the
+        discounted RETURN it earned (sum of this + future rewards in the run).
+        This is how a successful *sequence* credits the earlier actions that
+        set it up — turning the one-step bandit into real RL. Only updates
+        rows that already exist (the action was consolidated as a skill)."""
+        args_json = json.dumps(args, sort_keys=True, default=str)[:1000]
+        row = self.conn.execute(
+            "SELECT id, value FROM skills WHERE signature=? AND effector=? AND args_json=?",
+            (signature, effector, args_json),
+        ).fetchone()
+        if row is None:
+            return
+        new_val = float(row["value"]) + alpha * (float(return_value) - float(row["value"]))
+        new_val = max(-1.0, min(1.0, new_val))
+        self.conn.execute("UPDATE skills SET value=? WHERE id=?",
+                          (new_val, int(row["id"])))
+        self.conn.commit()
+
     # ── inspection ──────────────────────────────────────────────────────────
     def top(self, k: int = 10) -> list[Skill]:
         rows = self.conn.execute(
@@ -224,6 +253,7 @@ class SkillStore:
             successes=int(row["successes"]),
             last_used=float(row["last_used"]),
             last_outcome=row["last_outcome"],
+            value=float(row["value"]) if "value" in row.keys() else 0.0,
         )
 
     def close(self) -> None:
