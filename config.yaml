@@ -88,6 +88,17 @@ forward_model:
   lr: 0.001
   min_rows: 40
 
+# Imagination-based planning — the learned Monitor. When enabled, before a
+# deliberate (System-2) action is gated, a deterministic Predictor consults the
+# forward model / world-model k-NN and vetoes actions it confidently predicts
+# will fail in the current state. The validity check is LEARNED, not coded; no
+# LLM calls. No-ops until `min_rows` world-model rows accumulate. Default off.
+planning:
+  enabled: false
+  veto_floor: 0.30      # min confidence in predicted-failure before vetoing
+  min_rows: 40          # world-model rows required before the Monitor activates
+  max_depth: 1          # single-step today (multi-step latent rollout = Phase 1b)
+
 # Humanization — persistent mood/drives/distractions and an ambient world.
 # Set humanize=false to fall back to the vanilla GWT brain (for A/B eval).
 humanize: true

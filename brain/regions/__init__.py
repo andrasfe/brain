@@ -10,6 +10,7 @@ from .default_mode import DefaultMode
 from .locus_coeruleus import LocusCoeruleus
 from .vta import VTA
 from .cerebellum import Cerebellum, CerebellumPrediction
+from .predictor import Predictor, PlanEvaluation
 from .occipital import Occipital
 
 __all__ = [
@@ -25,5 +26,7 @@ __all__ = [
     "VTA",
     "Cerebellum",
     "CerebellumPrediction",
+    "Predictor",
+    "PlanEvaluation",
     "Occipital",
 ]

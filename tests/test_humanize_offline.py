@@ -1806,6 +1806,153 @@ class EmbodimentIntegrationTests(unittest.TestCase):
             brain.close()
 
 
+class ImaginationTests(unittest.TestCase):
+    """Phase 0 — shared planning/replay substrate (pure-Python, no numpy)."""
+
+    def test_cosine_identity_and_orthogonal(self):
+        from brain.imagination import cosine
+        self.assertAlmostEqual(cosine([1.0, 2.0, 3.0], [1.0, 2.0, 3.0]), 1.0, places=6)
+        self.assertAlmostEqual(cosine([1.0, 0.0], [0.0, 1.0]), 0.0, places=6)
+        self.assertEqual(cosine(None, [1.0]), 0.0)
+        self.assertEqual(cosine([0.0, 0.0], [1.0, 1.0]), 0.0)
+
+    def test_embed_text_none_for_sparse_backend(self):
+        from brain.imagination import embed_text
+        from brain.embeddings import TfidfBackend
+        # TfidfBackend is not persistent → no dense vector to plan with.
+        self.assertIsNone(embed_text(TfidfBackend(), "hello"))
+        self.assertIsNone(embed_text(None, "hello"))
+
+    def test_embed_text_roundtrip_dense_backend(self):
+        from brain.imagination import embed_text
+        backend = MagicMock()
+        backend.persistent = True
+        backend.encode_one.return_value = b"blob"
+        backend.from_bytes.return_value = [0.1, 0.2, 0.3]
+        self.assertEqual(embed_text(backend, "x"), [0.1, 0.2, 0.3])
+
+    def test_discounted_returns(self):
+        from brain.imagination import discounted_returns
+        traj = [("s1", "a", {}, 1.0), ("s2", "b", {}, 0.0), ("s3", "c", {}, 1.0)]
+        out = discounted_returns(traj, gamma=0.9)
+        gs = [round(g, 4) for *_rest, g in out]
+        # G3=1.0, G2=0+0.9*1=0.9, G1=1+0.9*0.9=1.81 (forward order)
+        self.assertEqual(gs, [1.81, 0.9, 1.0])
+        # order/labels preserved
+        self.assertEqual([r[1] for r in out], ["a", "b", "c"])
+
+    def test_goal_text_from_percept(self):
+        from brain.imagination import goal_text
+        from brain.workspace import Broadcast
+        ws = Workspace(task="t")
+        ws.post(Broadcast(source="sensory_cortex", kind="percept", content="g",
+                          salience=0.9, data={"goal": "win the game"}))
+        self.assertEqual(goal_text(ws), "win the game")
+
+
+class PredictorTests(unittest.TestCase):
+    """Phase 1 single-step — the learned Monitor (deterministic, no LLM)."""
+
+    def _cfg(self):
+        from brain.config import Config
+        return Config(raw={}, api_key="", base_url="http://x", require_auth=False,
+                      extra_headers={}, models={"reflex": "x", "executive": "y"},
+                      timeout_seconds=10, max_retries=0,
+                      sandbox_dir=Path(tempfile.mkdtemp()),
+                      db_path=Path(tempfile.mkdtemp()) / "m.sqlite",
+                      loop={}, memory={}, effectors={}, regions={})
+
+    def _fake_cerebellum(self, pred, n_rows=100, forward_model=None):
+        from brain.regions.cerebellum import CerebellumPrediction  # noqa: F401
+        cb = MagicMock()
+        cb.world_model = MagicMock()
+        cb.world_model.count.return_value = n_rows
+        cb.forward_model = forward_model
+        cb.quick_predict.return_value = pred
+        return cb
+
+    def _pred(self, ok, conf, n=2, top=0.5, outcome="error: file not found"):
+        from brain.regions.cerebellum import CerebellumPrediction
+        return CerebellumPrediction(predicted_outcome=outcome, confidence=conf,
+                                    predicted_ok=ok, n_matches=n, top_similarity=top)
+
+    def _ws(self):
+        from brain.workspace import Broadcast
+        ws = Workspace(task="do a thing")
+        ws.post(Broadcast(source="sensory_cortex", kind="percept", content="g",
+                          salience=0.9, data={"goal": "do a thing", "entities": []}))
+        return ws
+
+    def test_vetoes_confident_predicted_failure(self):
+        from brain.regions import Predictor
+        cb = self._fake_cerebellum(self._pred(ok=False, conf=0.6))
+        p = Predictor(self._cfg(), llm=None, cerebellum=cb,
+                      world_model=cb.world_model, veto_floor=0.30)
+        plan = p.evaluate(self._ws(), [("shell", {"cmd": "rm x"})])
+        self.assertIsNotNone(plan)
+        self.assertTrue(plan.vetoed)
+        self.assertIn("predicted failure", plan.reason)
+
+    def test_no_veto_when_predicted_ok(self):
+        from brain.regions import Predictor
+        cb = self._fake_cerebellum(self._pred(ok=True, conf=0.9))
+        p = Predictor(self._cfg(), llm=None, cerebellum=cb,
+                      world_model=cb.world_model, veto_floor=0.30)
+        plan = p.evaluate(self._ws(), [("write_file", {"path": "a"})])
+        self.assertFalse(plan.vetoed)
+        self.assertTrue(plan.predicted_ok)
+
+    def test_no_veto_below_floor(self):
+        from brain.regions import Predictor
+        cb = self._fake_cerebellum(self._pred(ok=False, conf=0.2))
+        p = Predictor(self._cfg(), llm=None, cerebellum=cb,
+                      world_model=cb.world_model, veto_floor=0.30)
+        self.assertFalse(p.evaluate(self._ws(), [("shell", {})]).vetoed)
+
+    def test_no_veto_when_not_useful(self):
+        # No world-model neighbours → is_useful False → never veto (don't act
+        # on a prediction the model can't back up).
+        from brain.regions import Predictor
+        cb = self._fake_cerebellum(self._pred(ok=False, conf=0.9, n=0, top=0.0))
+        p = Predictor(self._cfg(), llm=None, cerebellum=cb,
+                      world_model=cb.world_model, veto_floor=0.30)
+        self.assertFalse(p.evaluate(self._ws(), [("shell", {})]).vetoed)
+
+    def test_inactive_below_min_rows_returns_none(self):
+        from brain.regions import Predictor
+        cb = self._fake_cerebellum(self._pred(ok=False, conf=0.9), n_rows=5)
+        p = Predictor(self._cfg(), llm=None, cerebellum=cb,
+                      world_model=cb.world_model, min_rows=40)
+        self.assertFalse(p.is_active)
+        self.assertIsNone(p.evaluate(self._ws(), [("shell", {})]))
+
+    def test_active_with_forward_model_even_without_rows(self):
+        from brain.regions import Predictor
+        cb = self._fake_cerebellum(self._pred(ok=True, conf=0.5),
+                                   n_rows=0, forward_model=object())
+        p = Predictor(self._cfg(), llm=None, cerebellum=cb,
+                      world_model=cb.world_model, min_rows=40)
+        self.assertTrue(p.is_active)
+
+    def test_disabled_by_default_in_orchestrator(self):
+        # planning.enabled defaults off → Brain builds no predictor.
+        from brain.config import Config
+        from brain.orchestrator import Brain
+        cfg = Config(raw={"persona_path": None}, api_key="", base_url="http://x",
+                     require_auth=False, extra_headers={},
+                     models={"reflex": "x", "executive": "y"}, timeout_seconds=10,
+                     max_retries=0, sandbox_dir=Path(tempfile.mkdtemp()),
+                     db_path=Path(tempfile.mkdtemp()) / "m.sqlite",
+                     loop={}, memory={}, effectors={}, regions={})
+        with patch("brain.orchestrator.make_backend") as mk:
+            from brain.embeddings import TfidfBackend
+            mk.return_value = TfidfBackend()
+            brain = Brain(cfg, confirm=lambda _m: True, log=lambda _m: None,
+                          humanize=False)
+            self.assertIsNone(brain.predictor)
+            brain.close()
+
+
 class ForwardModelTests(unittest.TestCase):
     """The learned forward model (numpy MLP) and its sleep-time trainer."""
 

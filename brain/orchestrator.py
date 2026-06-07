@@ -40,6 +40,7 @@ from .memory import EPISODIC, Memory, SEMANTIC
 from .persona import Persona, load_persona
 from .skills import SkillStore, prediction_surprise, signature_from_percept
 from .world_model import WorldModelStore, render_action, render_state
+from . import imagination as _imagination
 from .regions import (
     Amygdala,
     BasalGanglia,
@@ -50,6 +51,7 @@ from .regions import (
     Hippocampus,
     Interoception,
     LocusCoeruleus,
+    Predictor,
     Prefrontal,
     SensoryCortex,
     VTA,
@@ -134,6 +136,19 @@ class Brain:
                                        forward_model=fwd_model,
                                        embedding_backend=backend)
 
+        # Predictor (learned Monitor) — imagination-based planning. Off by
+        # default; when `planning.enabled` it vetoes deliberate actions the
+        # forward model / world-model k-NN confidently predicts will fail. No
+        # LLM calls; no-ops until enough world-model data exists.
+        self.predictor = None
+        plan_cfg = (cfg.raw.get("planning") or {})
+        if plan_cfg.get("enabled"):
+            self.predictor = Predictor(
+                cfg, self.llm, cerebellum=self.cerebellum,
+                world_model=self.world_model,
+                min_rows=int(plan_cfg.get("min_rows", 40)),
+                veto_floor=float(plan_cfg.get("veto_floor", 0.30)))
+
         # Occipital (eyes) — only when embodied.
         self.occipital = None
         if self.embodiment is not None:
@@ -174,10 +189,8 @@ class Brain:
         traj = getattr(ws, "trajectory", None)
         if not traj:
             return
-        g = 0.0
         try:
-            for sig, eff, args, r in reversed(traj):
-                g = float(r) + gamma * g
+            for sig, eff, args, g in _imagination.discounted_returns(traj, gamma):
                 self.skills.reinforce(sig, eff, args, g, alpha=alpha)
         except Exception as e:  # noqa: BLE001 — learning must never break a run
             self.log(f"  ⚠ credit assignment skipped: {type(e).__name__}: {e}")
@@ -442,6 +455,40 @@ class Brain:
                 proposal = {"effector": (unit.args or {}).get("effector", "think"),
                              "args": (unit.args or {}).get("args") or unit.args,
                              "reasoning": unit.content}
+
+                # ── imagination: learned Monitor (System-2 foresight) ──────
+                # Before the mood-based gate, ask the forward model what this
+                # action does in this state. A confident predicted-failure is
+                # vetoed here — the chain sees the foresight and re-plans next
+                # step. Internal no-op effectors are skipped (nothing to learn).
+                if (self.predictor is not None
+                        and proposal["effector"] not in ("think",)):
+                    try:
+                        plan = self.predictor.evaluate(
+                            ws, [(proposal["effector"], proposal["args"])])
+                    except Exception as e:  # noqa: BLE001 — never break a run
+                        plan = None
+                        self.log(f"  ⚠ predictor skipped: {type(e).__name__}: {e}")
+                    if plan is not None and plan.vetoed:
+                        self.log(f"  ⊘ predictor veto (learned Monitor): "
+                                 f"{plan.reason}")
+                        ws.post(Broadcast(
+                            source="predictor", kind="prediction",
+                            content=f"foresight: action likely to fail — "
+                                    f"{plan.reason}",
+                            salience=0.72,
+                            data=plan.to_dict()))
+                        ws.thought_chain.append(ThoughtUnit(
+                            step=len(ws.thought_chain) + 1, source="predictor",
+                            content=f"(foresight) {plan.chosen_effector} likely "
+                                    f"to fail here: {plan.reason}",
+                            kind="appraise",
+                            affect_snapshot=ws.affect.mood_label))
+                        ws.affect.update("predictor", step,
+                                         {"arousal": +0.03}, smoothing=0.8)
+                        ws.affect.decay_toward_baseline()
+                        continue
+
                 gate = self.basal_ganglia.step(ws, proposal)
                 if gate.data.get("decision") != "go":
                     self.log(f"  ⊘ basal ganglia veto: "
