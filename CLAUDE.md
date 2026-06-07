@@ -104,6 +104,10 @@ python3 -m brain.consolidator --dry-run          # cluster + tag, no LLM
 # train the learned forward model (JEPA-lite) on world-model triples
 python3 -m brain.sleep.forward_model_trainer --epochs 300 --min-rows 40
 
+# train the action-conditioned VISUAL world model (true JEPA in DINOv2 space)
+# f([screen_vis ; action_emb]) -> (next_screen_vis, success_prob)
+python3 -m brain.sleep.visual_forward_model_trainer --epochs 200 --min-rows 40
+
 # learned models
 python3 -m brain.sleep.sequence_trainer    # (via daemon NREM) next-screen predictor
 python3 -m brain.embodiment_selftest        # prove eyes+hands safely (mouse-move only)
@@ -394,7 +398,40 @@ either recovers ("Forget the cat; …") or drifts.
   action (habit-fire and PFC paths both), with salience scaled by surprise
   so high-prediction-error rows are weighted more in future ranking. This
   is the LeCun-aligned piece: predictions live in a *learned* latent space
-  and improve with data, not with prompt tuning.
+  and improve with data, not with prompt tuning. The store also carries
+  **action-conditioned visual transitions**: `observe(..., state_vis=,
+  outcome_vis=)` records DINOv2 screen embeddings before/after the brain's own
+  screen actions; `visual_triples()` / `count_visual()` expose them as the
+  training set for the visual world model.
+
+- **`brain/imagination.py`** — shared substrate for model-based planning and
+  replay: `embed_text` (dense-backend round-trip), `cosine`, `goal_text/
+  goal_vec`, `discounted_returns` (the credit-assignment math, shared by waking
+  RL and sleep replay), and the `Rollout` dataclass. Pure-Python, no numpy at
+  import.
+
+- **`brain/regions/predictor.py`** — the **learned Monitor** (imagination-based
+  planning). Before a System-2 action is gated, `Predictor.evaluate(...)` asks
+  the forward model (text k-NN, learned forward model, or — with a DINOv2 screen
+  state — the **visual** forward model) whether the action succeeds in the
+  current state, and vetoes confident predicted failures. The chain sees the
+  foresight and re-plans. Validity-checking is *learned, not coded*. No LLM
+  calls; gated behind `planning.enabled`; no-ops until enough world-model data.
+  This is the MAP-paper "Monitor", realized in a learned latent space.
+
+- **Visual JEPA world model** — true JEPA over screens: a frozen DINOv2 encoder
+  (`vision_embed.py`) + a learned predictor in that visual latent space,
+  `f([screen_vis ; action_emb]) -> (next_screen_vis, success_prob)`. Trained
+  during NREM by **`brain/sleep/visual_forward_model_trainer.py`** on the
+  action-conditioned visual triples (separate `forward_model_visual.*`
+  checkpoint; the shared forward-model classes gained an asymmetric `in_dim`).
+  `Cerebellum.visual_predict(...)` runs it for the Predictor (V3 — visual
+  planning, with optional goal-screen distance = visual MPC). **`brain/sleep/
+  visual_replay.py`** (V4) is generative replay: it rehearses screen actions in
+  imagination and trains a `vis:`-keyed policy (`signature_from_visual`) — seeds
+  are REAL states, only outcomes imagined, and it trains the POLICY not the
+  simulator, so no representation collapse. Dual with the text world model
+  (visual for the embodied/screen domain). All guarded on torch/numpy/data.
 
 - **`brain/skills.py`** — `SkillStore` (the procedural-memory / System-1
   substrate) + `signature_from_percept` + `prediction_surprise`.
@@ -577,6 +614,10 @@ either recovers ("Forget the cat; …") or drifts.
 - `effectors.{filesystem,shell,web}.enabled` (+ `shell.require_confirmation`).
 - `regions.<name>: <tier>` — per-region tier assignment. Includes the new
   `interoception`, `default_mode`, `locus_coeruleus`, `vta` keys.
+- **`planning:`** — imagination-based planning (the learned Monitor). `enabled`
+  (default false), `veto_floor` (min confidence in predicted-failure to veto),
+  `min_rows` (world-model rows before it activates), `max_depth` (1 = single-
+  step today). No-ops until there's data to predict from.
 - **`humanize: true|false`** — master switch. False = vanilla GWT brain (no
   affect, world, DMN, VTA, LC, interoception) for A/B comparison.
 - **`persona_path`** — relative or absolute path to a persona YAML.
