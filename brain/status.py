@@ -151,7 +151,8 @@ def render_text(snap: dict) -> str:
     if st:
         keep = {k: st[k] for k in (
             "tasks_processed", "spontaneous_thoughts", "dreams_written",
-            "episodes_pruned", "facts_consolidated", "forward_model_trains")
+            "episodes_pruned", "facts_consolidated", "forward_model_trains",
+            "visual_forward_model_trains", "visual_replays")
             if k in st}
         if keep:
             lines.append(" sleep  : " + ", ".join(f"{k}={v}" for k, v in keep.items()))

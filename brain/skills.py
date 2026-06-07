@@ -54,6 +54,18 @@ def signature_from_percept(percept_data: dict, interrupt: Optional[str]) -> str:
     return f"e={'|'.join(entities)};g={'|'.join(goal_tokens)};{interrupt_flag}"
 
 
+def signature_from_visual(state_vis, dims: int = 12) -> str:
+    """Coarse, deterministic bucket of a DINOv2 screen embedding → a skill
+    signature for the VISUAL policy (sign pattern of the leading dims). Lossy on
+    purpose so similar screens share a habit key; namespaced 'vis:' so it never
+    collides with percept signatures. Used by visual generative replay."""
+    if not state_vis:
+        return "vis:none"
+    bits = "".join("1" if float(v) >= 0.0 else "0"
+                   for v in list(state_vis)[:dims])
+    return f"vis:{bits}"
+
+
 @dataclass
 class Skill:
     id: int

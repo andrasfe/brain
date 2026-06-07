@@ -58,7 +58,7 @@ from brain.observer import ScreenObserver  # noqa: E402
 from brain.presence import idle_seconds  # noqa: E402
 from brain.sleep import (  # noqa: E402
     Dreamer, Forgetter, ForwardModelTrainer, VisualForwardModelTrainer,
-    MoodRegulator, ScreenPurger,
+    VisualReplay, MoodRegulator, ScreenPurger,
     Scheduler, ScreenSequenceTrainer, SkillPruner, VisionTeacher,
 )
 from brain.status import write_status  # noqa: E402
@@ -86,6 +86,7 @@ class DaemonStats:
     prospective_fired: int = 0
     forward_model_trains: int = 0
     visual_forward_model_trains: int = 0
+    visual_replays: int = 0
     screen_model_trains: int = 0
     vision_rules_learned: int = 0
     observations_pruned: int = 0
@@ -165,6 +166,10 @@ class BrainDaemon:
             epochs=int(fm_cfg.get("epochs", 200)),
             min_rows=int(fm_cfg.get("min_rows", 40)),
         )
+        # Visual generative replay: rehearse screen actions in imagination,
+        # train the visual policy. Runs after the visual trainer each NREM bout.
+        self.visual_replay = VisualReplay(
+            min_rows=int(fm_cfg.get("min_rows", 40)))
         # Teacher-student: the executive model curates the student's
         # screen-reading skill during sleep. Only when capture is on.
         self.vision_teacher = (
@@ -523,6 +528,16 @@ class BrainDaemon:
             except Exception as e:
                 self.log(f"  ⚠ visual_forward_model trainer failed: "
                          f"{type(e).__name__}: {e}")
+            # visual generative replay: rehearse screen actions in imagination
+            # using the (freshly trained) visual model; train the visual policy.
+            try:
+                vr = self.visual_replay.run(
+                    self.brain.world_model, self.brain.skills,
+                    getattr(self.brain, "cerebellum", None),
+                    log=lambda m: self.log(f"  {m}"))
+                self.stats.visual_replays += int(vr.get("n", 0) or 0)
+            except Exception as e:
+                self.log(f"  ⚠ visual_replay failed: {type(e).__name__}: {e}")
             # screen-sequence trainer: learn the dynamics of the user's day
             # (next-screen prediction) from the observation stream; refresh the
             # live occipital model.

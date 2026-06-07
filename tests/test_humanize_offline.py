@@ -2382,6 +2382,70 @@ class VisualForwardModelTrainerTests(unittest.TestCase):
         mem.close(); wm.close()
 
 
+class VisualReplayTests(unittest.TestCase):
+    """V4 — generative replay trains the visual policy (collapse-safe)."""
+
+    def setUp(self):
+        try:
+            import numpy  # noqa: F401
+        except ImportError:
+            self.skipTest("numpy not installed")
+
+    def test_signature_from_visual_is_coarse_and_namespaced(self):
+        from brain.skills import signature_from_visual
+        s = signature_from_visual([0.1, -0.2, 0.3, -0.4, 0.5, -0.6,
+                                   0.7, -0.8, 0.9, -0.1, 0.2, -0.3])
+        self.assertTrue(s.startswith("vis:"))
+        # near-identical screens share a key (lossy on purpose)
+        a = signature_from_visual([0.10, 0.20, 0.30, 0.40] + [0.1] * 8)
+        b = signature_from_visual([0.11, 0.21, 0.31, 0.41] + [0.1] * 8)
+        self.assertEqual(a, b)
+        self.assertEqual(signature_from_visual([]), "vis:none")
+
+    def test_replay_reinforces_visual_policy(self):
+        from brain.sleep import VisualReplay
+        from brain.skills import SkillStore, signature_from_visual
+        from brain.world_model import WorldModelStore
+
+        backend = _DenseBackendStub()
+        tmp = Path(tempfile.mkdtemp())
+        wm = WorldModelStore(tmp / "wm.sqlite", backend=backend)
+        for i in range(50):
+            sv = [((i + j) % 5) / 5.0 for j in range(10)]
+            wm.observe("s", "screen_click(x=1)", "ok", ok=True,
+                       state_vis=sv, outcome_vis=sv)
+        skills = SkillStore(tmp / "skills.sqlite")
+
+        class _OkVisual:
+            def predict(self, s, a):
+                return ([0.0] * len(s), 0.95)   # confident success
+
+        cb = MagicMock()
+        cb.visual_forward_model = _OkVisual()
+        cb.embedding_backend = backend
+        out = VisualReplay(min_rows=20).run(wm, skills, cb, log=lambda _m: None)
+        self.assertTrue(out["replayed"])
+        self.assertGreater(out["n"], 0)
+        # a visual-keyed skill now exists with positive value (success rehearsed)
+        top = skills.top(20)
+        vis_skills = [s for s in top if s.signature.startswith("vis:")]
+        self.assertTrue(vis_skills)
+        self.assertGreater(max(s.value for s in vis_skills), 0.0)
+        wm.close(); skills.close()
+
+    def test_replay_noops_without_visual_model(self):
+        from brain.sleep import VisualReplay
+        from brain.skills import SkillStore
+        from brain.world_model import WorldModelStore
+        tmp = Path(tempfile.mkdtemp())
+        wm = WorldModelStore(tmp / "wm.sqlite", backend=_DenseBackendStub())
+        skills = SkillStore(tmp / "skills.sqlite")
+        cb = MagicMock(); cb.visual_forward_model = None
+        out = VisualReplay(min_rows=20).run(wm, skills, cb, log=lambda _m: None)
+        self.assertFalse(out["replayed"])
+        wm.close(); skills.close()
+
+
 class ScreenObserverTests(unittest.TestCase):
     """Capture loop + privacy spine — local-only, exclusion, pixel-drop."""
 
