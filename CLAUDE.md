@@ -97,6 +97,10 @@ python3 -m eval.humanize --n 4                   # divergence battery vs raw
 python3 -m eval.quick_smoke                      # minimal raw-vs-humanized smoke
 python3 -m eval.stream_demo                      # show chain unfolding per scenario
 
+# capability demos — no LLM, no hardware, run in seconds
+python3 -m eval.visual_jepa_demo                 # visual world model learns + Monitor vetoes
+python3 -m eval.planning_demo                    # text learned Monitor vetoes a bad action
+
 # offline 'sleep' pass — distill episodic clusters into semantic facts
 python3 -m brain.consolidator --n 200 --max-facts 10
 python3 -m brain.consolidator --dry-run          # cluster + tag, no LLM
