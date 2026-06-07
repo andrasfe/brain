@@ -195,6 +195,39 @@ class Brain:
         except Exception as e:  # noqa: BLE001 — learning must never break a run
             self.log(f"  ⚠ credit assignment skipped: {type(e).__name__}: {e}")
 
+    # Screen effectors whose execution actually changes the screen — the only
+    # actions worth recording as action-conditioned VISUAL transitions. (The
+    # passive user-watching stream feeds the unconditioned screen_model.)
+    _SCREEN_EFFECTORS = frozenset(
+        {"screen_click", "screen_type", "screen_key", "screen_scroll"})
+
+    def _visual_state(self):
+        """Capture the current screen and return its DINOv2 embedding, then
+        DROP the pixels. None unless embodied AND a working visual embedder is
+        present — so it no-ops on disembodied / text-only brains. This is the
+        substrate of the action-conditioned visual world model (V1)."""
+        if self.embodiment is None or self.visual_embedder is None:
+            return None
+        if not getattr(self.visual_embedder, "available", False):
+            return None
+        try:
+            obs = self.embodiment.observe()
+        except Exception:
+            return None
+        path = getattr(getattr(obs, "frame", None), "path", None)
+        if not path:
+            return None
+        try:
+            return self.visual_embedder.embed(path)
+        except Exception:
+            return None
+        finally:
+            try:
+                import os
+                os.remove(path)
+            except OSError:
+                pass
+
     def _build_visual_embedder(self, cfg: Config):
         mode = str((cfg.capture or {}).get("visual_embed", "none")).lower()
         if mode == "none":
@@ -371,6 +404,8 @@ class Brain:
                 _wm_state = render_state(ws)
                 _wm_action = render_action(habit_proposal["effector"],
                                             habit_proposal["args"])
+                _hb_screen = habit_proposal["effector"] in self._SCREEN_EFFECTORS
+                _wm_vis_before = self._visual_state() if _hb_screen else None
                 # Append a synthetic ThoughtUnit so the chain still reads as
                 # a continuous stream (BG-sourced, kind=action).
                 ws.thought_chain.append(ThoughtUnit(
@@ -386,6 +421,7 @@ class Brain:
                 eff = habit_proposal["effector"]
                 args = habit_proposal["args"]
                 ok, result = self.effectors.execute(eff, args)
+                _wm_vis_after = self._visual_state() if _hb_screen else None
                 self.log(f"  ▶ {eff} -> {'ok' if ok else 'ERR'}: {result[:80]}")
                 ws.history.append(ActionRecord(
                     cycle=step, effector=eff, args=args,
@@ -408,7 +444,8 @@ class Brain:
                 try:
                     self.world_model.observe(
                         _wm_state, _wm_action, result, ok=ok,
-                        source="observed", salience=0.5)
+                        source="observed", salience=0.5,
+                        state_vis=_wm_vis_before, outcome_vis=_wm_vis_after)
                 except Exception as e:  # noqa: BLE001 — never fail a run
                     self.log(f"  ⚠ world_model.observe skipped: {e}")
                 if not ok:
@@ -525,8 +562,15 @@ class Brain:
                 # describe the situation that LED to this choice).
                 _wm_state = render_state(ws)
                 _wm_action = render_action(eff, args)
+                # Visual world model (V1): for screen actions, grab the DINOv2
+                # screen embedding before/after so we learn the action-
+                # conditioned visual transition. No-op when disembodied.
+                _wm_vis_before = (self._visual_state()
+                                  if eff in self._SCREEN_EFFECTORS else None)
 
                 ok, result = self.effectors.execute(eff, args)
+                _wm_vis_after = (self._visual_state()
+                                 if eff in self._SCREEN_EFFECTORS else None)
                 self.log(f"  ▶ {eff} -> {'ok' if ok else 'ERR'}: {result[:80]}")
                 ws.history.append(ActionRecord(
                     cycle=step, effector=eff, args=args, result=result, ok=ok))
@@ -599,7 +643,8 @@ class Brain:
                     wm_sal = 0.45 + 0.5 * max(0.0, surprise)
                     self.world_model.observe(
                         _wm_state, _wm_action, result, ok=ok,
-                        source="observed", salience=min(0.95, wm_sal))
+                        source="observed", salience=min(0.95, wm_sal),
+                        state_vis=_wm_vis_before, outcome_vis=_wm_vis_after)
                 except Exception as e:  # noqa: BLE001
                     self.log(f"  ⚠ world_model.observe skipped: {e}")
 

@@ -125,37 +125,85 @@ class WorldModelStore:
                 ok           INTEGER NOT NULL DEFAULT 1,
                 source       TEXT NOT NULL DEFAULT 'observed',
                 salience     REAL NOT NULL DEFAULT 0.5,
-                state_emb    BLOB
+                state_emb    BLOB,
+                state_vis_emb   BLOB,
+                outcome_vis_emb BLOB
             );
             CREATE INDEX IF NOT EXISTS idx_wm_ts ON world_model(ts);
             CREATE INDEX IF NOT EXISTS idx_wm_source ON world_model(source);
         """)
+        # Auto-migrate older single-modality DBs: add the visual columns if
+        # the table predates them (DINOv2 state/outcome embeddings for the
+        # action-conditioned visual world model).
+        existing = {r["name"] for r in
+                    self.conn.execute("PRAGMA table_info(world_model)").fetchall()}
+        for col in ("state_vis_emb", "outcome_vis_emb"):
+            if col not in existing:
+                self.conn.execute(f"ALTER TABLE world_model ADD COLUMN {col} BLOB")
         self.conn.commit()
 
     # ── observe ─────────────────────────────────────────────────────────────
     def observe(self, state_text: str, action_text: str, outcome_text: str,
                 ok: bool = True, source: str = "observed",
-                salience: float = 0.5) -> int:
+                salience: float = 0.5,
+                state_vis: Optional[list] = None,
+                outcome_vis: Optional[list] = None) -> int:
         """Record one (state, action, outcome) triple.
 
         Salience is bumped automatically for high-surprise observations; the
         caller can also pass it explicitly (e.g. dreams arrive with low
-        salience, real observations with mid)."""
+        salience, real observations with mid).
+
+        `state_vis` / `outcome_vis` are optional DINOv2 screen embeddings — the
+        substrate of the action-conditioned VISUAL world model. When present,
+        the same row carries both the text triple and the visual transition, so
+        the visual forward model trains on `f([state_vis;action]) -> outcome_vis`."""
         emb_blob: Optional[bytes] = None
         if self.backend.persistent:
             try:
                 emb_blob = self.backend.encode_one(state_text)
             except Exception:
                 emb_blob = None
+        sv = _pack_floats(state_vis) if state_vis else None
+        ov = _pack_floats(outcome_vis) if outcome_vis else None
         cur = self.conn.execute(
             "INSERT INTO world_model (ts, state_text, action_text, outcome_text, "
-            "ok, source, salience, state_emb) VALUES (?,?,?,?,?,?,?,?)",
+            "ok, source, salience, state_emb, state_vis_emb, outcome_vis_emb) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
             (time.time(), state_text[:600], action_text[:280],
              outcome_text[:600], int(bool(ok)), source,
-             float(salience), emb_blob),
+             float(salience), emb_blob, sv, ov),
         )
         self.conn.commit()
         return int(cur.lastrowid)
+
+    def visual_triples(self, limit: int = 4000) -> list[dict[str, Any]]:
+        """Return recent rows that carry BOTH a state and outcome visual
+        embedding — the training set for the visual forward model (V2).
+        Embeddings are unpacked to float lists."""
+        rows = self.conn.execute(
+            "SELECT id, action_text, ok, state_vis_emb, outcome_vis_emb "
+            "FROM world_model WHERE state_vis_emb IS NOT NULL "
+            "AND outcome_vis_emb IS NOT NULL ORDER BY ts DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            out.append({
+                "id": int(r["id"]),
+                "action_text": r["action_text"],
+                "ok": int(r["ok"]),
+                "state_vis": _unpack_floats(r["state_vis_emb"]),
+                "outcome_vis": _unpack_floats(r["outcome_vis_emb"]),
+            })
+        return out
+
+    def count_visual(self) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM world_model "
+            "WHERE state_vis_emb IS NOT NULL AND outcome_vis_emb IS NOT NULL"
+        ).fetchone()
+        return int(row["n"])
 
     # ── predict ─────────────────────────────────────────────────────────────
     def predict(self, state_text: str, action_text: str, k: int = 3,

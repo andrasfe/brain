@@ -1953,6 +1953,97 @@ class PredictorTests(unittest.TestCase):
             brain.close()
 
 
+class VisualWorldModelTests(unittest.TestCase):
+    """V0 — action-conditioned visual triples in the world model."""
+
+    def _wm(self):
+        from brain.world_model import WorldModelStore
+        return WorldModelStore(Path(tempfile.mkdtemp()) / "wm.sqlite")
+
+    def test_observe_and_query_visual_triples(self):
+        wm = self._wm()
+        wm.observe("s", "screen_click(x=1)", "toast", ok=True,
+                   state_vis=[0.1, 0.2], outcome_vis=[0.3, 0.4])
+        wm.observe("s2", "think()", "ok")          # text-only, no visual
+        self.assertEqual(wm.count_visual(), 1)
+        self.assertEqual(wm.count(), 2)
+        t = wm.visual_triples()
+        self.assertEqual(len(t), 1)
+        self.assertEqual(t[0]["action_text"], "screen_click(x=1)")
+        self.assertAlmostEqual(t[0]["state_vis"][0], 0.1, places=5)
+        self.assertAlmostEqual(t[0]["outcome_vis"][1], 0.4, places=5)
+        wm.close()
+
+    def test_migration_adds_visual_columns(self):
+        import sqlite3
+        tmp = Path(tempfile.mkdtemp()) / "old.sqlite"
+        c = sqlite3.connect(str(tmp))
+        c.executescript(
+            "CREATE TABLE world_model (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "ts REAL NOT NULL, state_text TEXT NOT NULL, action_text TEXT NOT NULL, "
+            "outcome_text TEXT NOT NULL, ok INTEGER NOT NULL DEFAULT 1, "
+            "source TEXT NOT NULL DEFAULT 'observed', salience REAL NOT NULL "
+            "DEFAULT 0.5, state_emb BLOB);")
+        c.commit(); c.close()
+        from brain.world_model import WorldModelStore
+        wm = WorldModelStore(tmp)
+        cols = {r["name"] for r in
+                wm.conn.execute("PRAGMA table_info(world_model)").fetchall()}
+        self.assertIn("state_vis_emb", cols)
+        self.assertIn("outcome_vis_emb", cols)
+        wm.observe("s", "screen_click()", "o", state_vis=[1.0], outcome_vis=[2.0])
+        self.assertEqual(wm.count_visual(), 1)
+        wm.close()
+
+
+class VisualCaptureTests(unittest.TestCase):
+    """V1 — Brain._visual_state capture helper (embed-then-drop, fallbacks)."""
+
+    def _brain(self):
+        from brain.config import Config
+        from brain.orchestrator import Brain
+        cfg = Config(raw={"persona_path": None}, api_key="", base_url="http://x",
+                     require_auth=False, extra_headers={},
+                     models={"reflex": "x", "executive": "y"}, timeout_seconds=10,
+                     max_retries=0, sandbox_dir=Path(tempfile.mkdtemp()),
+                     db_path=Path(tempfile.mkdtemp()) / "m.sqlite",
+                     loop={}, memory={}, effectors={}, regions={})
+        with patch("brain.orchestrator.make_backend") as mk:
+            from brain.embeddings import TfidfBackend
+            mk.return_value = TfidfBackend()
+            return Brain(cfg, confirm=lambda _m: True, log=lambda _m: None,
+                         humanize=False)
+
+    def test_none_when_disembodied(self):
+        brn = self._brain()
+        self.assertIsNone(brn.embodiment)
+        self.assertIsNone(brn._visual_state())
+        brn.close()
+
+    def test_embeds_and_drops_pixels(self):
+        import types
+        brn = self._brain()
+        p = Path(tempfile.mkdtemp()) / "frame.png"
+        p.write_bytes(b"pngdata")
+        emb = MagicMock(); emb.available = True; emb.embed.return_value = [0.5, 0.6, 0.7]
+        obs = types.SimpleNamespace(frame=types.SimpleNamespace(path=str(p)))
+        embod = MagicMock(); embod.observe.return_value = obs
+        brn.embodiment = embod
+        brn.visual_embedder = emb
+        vec = brn._visual_state()
+        self.assertEqual(vec, [0.5, 0.6, 0.7])
+        self.assertFalse(p.exists())              # pixels dropped
+        brn.close()
+
+    def test_none_when_embedder_unavailable(self):
+        brn = self._brain()
+        emb = MagicMock(); emb.available = False
+        brn.embodiment = MagicMock()
+        brn.visual_embedder = emb
+        self.assertIsNone(brn._visual_state())
+        brn.close()
+
+
 class ForwardModelTests(unittest.TestCase):
     """The learned forward model (numpy MLP) and its sleep-time trainer."""
 

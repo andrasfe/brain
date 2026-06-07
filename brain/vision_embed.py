@@ -74,7 +74,11 @@ class VisualEmbedder:
             x = self._transform(img).unsqueeze(0).to(self._device)
             with torch.no_grad():
                 feat = self._model(x)            # (1, dim)
-            vec = feat[0].float().cpu().tolist()
+                # L2-normalize so the visual world model predicts/scores on a
+                # unit sphere — cosine in DINO space becomes a dot product and
+                # MSE targets share a consistent scale.
+                feat = torch.nn.functional.normalize(feat.float(), dim=-1)
+            vec = feat[0].cpu().tolist()
             self.dim = len(vec)
             return vec
         except Exception:
