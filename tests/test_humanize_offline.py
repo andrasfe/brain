@@ -1868,6 +1868,7 @@ class PredictorTests(unittest.TestCase):
         cb.world_model = MagicMock()
         cb.world_model.count.return_value = n_rows
         cb.forward_model = forward_model
+        cb.visual_forward_model = None   # explicit: MagicMock would auto-truthy
         cb.quick_predict.return_value = pred
         return cb
 
@@ -1933,6 +1934,50 @@ class PredictorTests(unittest.TestCase):
         p = Predictor(self._cfg(), llm=None, cerebellum=cb,
                       world_model=cb.world_model, min_rows=40)
         self.assertTrue(p.is_active)
+
+    def test_visual_predict_vetoes_via_visual_model(self):
+        # V3: with a DINOv2 state + a visual forward model that predicts
+        # failure, the Monitor vetoes in visual space (no k-NN needed).
+        from brain.regions import Predictor
+        from brain.regions.cerebellum import Cerebellum
+        from brain.config import Config
+
+        class _AlwaysFailVisual:
+            def predict(self, s, a):
+                return ([0.0] * len(s), 0.03)   # low ok_prob → predicted failure
+
+        backend = _DenseBackendStub()
+        cfg = self._cfg()
+        cb = Cerebellum(cfg, llm=None, world_model=None,
+                        forward_model=None, embedding_backend=backend,
+                        visual_forward_model=_AlwaysFailVisual())
+        p = Predictor(cfg, llm=None, cerebellum=cb, world_model=None,
+                      veto_floor=0.30)
+        self.assertTrue(p.is_active)                # visual model alone activates it
+        plan = p.evaluate(self._ws(), [("screen_click", {"x": 5})],
+                          state_vis=[0.1, 0.2, 0.3, 0.4])
+        self.assertIsNotNone(plan)
+        self.assertTrue(plan.vetoed)
+        self.assertFalse(plan.predicted_ok)
+
+    def test_visual_predict_no_veto_when_success(self):
+        from brain.regions import Predictor
+        from brain.regions.cerebellum import Cerebellum
+
+        class _AlwaysOkVisual:
+            def predict(self, s, a):
+                return ([0.0] * len(s), 0.97)
+
+        backend = _DenseBackendStub()
+        cfg = self._cfg()
+        cb = Cerebellum(cfg, llm=None, world_model=None, forward_model=None,
+                        embedding_backend=backend,
+                        visual_forward_model=_AlwaysOkVisual())
+        p = Predictor(cfg, llm=None, cerebellum=cb, world_model=None)
+        plan = p.evaluate(self._ws(), [("screen_click", {"x": 5})],
+                          state_vis=[0.1, 0.2])
+        self.assertFalse(plan.vetoed)
+        self.assertTrue(plan.predicted_ok)
 
     def test_disabled_by_default_in_orchestrator(self):
         # planning.enabled defaults off → Brain builds no predictor.

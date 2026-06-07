@@ -73,20 +73,31 @@ class Predictor(Region):
         wm = self.world_model or getattr(self.cerebellum, "world_model", None)
         has_data = wm is not None and wm.count() >= self.min_rows
         has_model = getattr(self.cerebellum, "forward_model", None) is not None
-        return bool(has_data or has_model)
+        has_visual = getattr(self.cerebellum, "visual_forward_model", None) is not None
+        return bool(has_data or has_model or has_visual)
 
     def evaluate(self, ws: Workspace,
                  candidates: List[Tuple[str, dict]],
-                 depth: int = 1) -> Optional[PlanEvaluation]:
+                 depth: int = 1, state_vis=None,
+                 goal_vis=None) -> Optional[PlanEvaluation]:
         """Score each candidate action by its predicted outcome in the current
         state and return the best, flagged `vetoed` when the top candidate is a
-        confident predicted failure. depth>1 (multi-step latent rollout) is
-        Phase 1b; today we evaluate one step."""
+        confident predicted failure.
+
+        When a DINOv2 `state_vis` is supplied and a visual forward model is
+        loaded, prediction happens in VISUAL latent space (the action's screen
+        consequence + optional goal-distance vs `goal_vis`); otherwise it falls
+        back to the text k-NN path. depth>1 (multi-step rollout) is Phase 1b."""
         if not self.is_active or not candidates:
             return None
         scored = []
         for eff, args in candidates:
-            pred = self.cerebellum.quick_predict(ws, eff, args or {})
+            pred = None
+            if state_vis is not None:
+                pred = self.cerebellum.visual_predict(state_vis, eff, args or {},
+                                                      goal_vis=goal_vis)
+            if pred is None:
+                pred = self.cerebellum.quick_predict(ws, eff, args or {})
             scored.append((eff, args or {}, pred))
         # Prefer predicted-ok candidates, then higher confidence.
         scored.sort(key=lambda t: (1 if t[2].predicted_ok else 0, t[2].confidence),

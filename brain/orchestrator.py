@@ -512,16 +512,26 @@ class Brain:
                              "args": (unit.args or {}).get("args") or unit.args,
                              "reasoning": unit.content}
 
+                # Visual state captured once (screen actions, embodied): reused
+                # by the visual Monitor below AND the world-model 'before' row,
+                # so we screenshot at most once per action.
+                _pre_eff = proposal["effector"]
+                _wm_vis_before = (self._visual_state()
+                                  if _pre_eff in self._SCREEN_EFFECTORS else None)
+
                 # ── imagination: learned Monitor (System-2 foresight) ──────
                 # Before the mood-based gate, ask the forward model what this
                 # action does in this state. A confident predicted-failure is
                 # vetoed here — the chain sees the foresight and re-plans next
                 # step. Internal no-op effectors are skipped (nothing to learn).
+                # With a visual state + visual forward model, the prediction
+                # happens in DINOv2 space (the screen consequence).
                 if (self.predictor is not None
                         and proposal["effector"] not in ("think",)):
                     try:
                         plan = self.predictor.evaluate(
-                            ws, [(proposal["effector"], proposal["args"])])
+                            ws, [(proposal["effector"], proposal["args"])],
+                            state_vis=_wm_vis_before)
                     except Exception as e:  # noqa: BLE001 — never break a run
                         plan = None
                         self.log(f"  ⚠ predictor skipped: {type(e).__name__}: {e}")
@@ -581,11 +591,11 @@ class Brain:
                 # describe the situation that LED to this choice).
                 _wm_state = render_state(ws)
                 _wm_action = render_action(eff, args)
-                # Visual world model (V1): for screen actions, grab the DINOv2
-                # screen embedding before/after so we learn the action-
-                # conditioned visual transition. No-op when disembodied.
-                _wm_vis_before = (self._visual_state()
-                                  if eff in self._SCREEN_EFFECTORS else None)
+                # Visual world model: _wm_vis_before was captured before the
+                # Monitor (reused here). If BG repaired the effector to a
+                # non-screen verb, discard it so we don't mislabel the row.
+                if eff not in self._SCREEN_EFFECTORS:
+                    _wm_vis_before = None
 
                 ok, result = self.effectors.execute(eff, args)
                 _wm_vis_after = (self._visual_state()

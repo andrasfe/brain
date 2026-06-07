@@ -164,6 +164,45 @@ class Cerebellum(Region):
             top_similarity=top_sim,
         )
 
+    # ── visual prediction (DINOv2 latent space) ────────────────────────────
+    def visual_predict(self, state_vis, effector: str, args: dict,
+                       goal_vis=None) -> Optional[CerebellumPrediction]:
+        """Predict the outcome of a SCREEN action from a DINOv2 screen
+        embedding via the learned visual forward model. Returns None when no
+        visual model / no visual state / the action can't be embedded — callers
+        fall back to the text k-NN path. The predicted next-screen embedding is
+        scored against `goal_vis` (a target screen) when provided, threading
+        goal-distance into confidence — the substrate of visual MPC (Phase 1b)."""
+        if self.visual_forward_model is None or state_vis is None:
+            return None
+        bk = self.embedding_backend
+        if bk is None or not getattr(bk, "persistent", False):
+            return None
+        action_text = render_action(effector, args or {})
+        try:
+            blob = bk.encode_one(action_text)
+            a = bk.from_bytes(blob) if blob else None
+        except Exception:
+            a = None
+        if a is None:
+            return None
+        try:
+            next_vis, ok_prob = self.visual_forward_model.predict(state_vis, a)
+        except Exception:
+            return None
+        conf = round(abs(float(ok_prob) - 0.5) * 2.0, 4)
+        # Optional goal-distance: how close is the imagined next screen to the
+        # target screen? Cosine in (unit-normalized) DINO space.
+        if goal_vis is not None:
+            from ..imagination import cosine
+            sim = cosine(next_vis, goal_vis)
+            conf = round(max(0.0, min(1.0, 0.5 * conf + 0.5 * max(0.0, sim))), 4)
+        # top_similarity floored so is_useful is True whenever the model spoke.
+        return CerebellumPrediction(
+            predicted_outcome="", confidence=conf,
+            predicted_ok=bool(ok_prob >= 0.5), n_matches=1,
+            top_similarity=max(self.min_top_sim, conf))
+
     # ── optional cycle step: post a status broadcast for inspection ────────
     def step(self, ws: Workspace) -> Broadcast | None:
         """Low-salience cycle broadcast so the trace shows the cerebellum
