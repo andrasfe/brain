@@ -2263,6 +2263,80 @@ class ForwardModelTrainerTests(unittest.TestCase):
         wm.close()
 
 
+class VisualForwardModelTrainerTests(unittest.TestCase):
+    """V2 — train the action-conditioned visual world model (asymmetric dims)."""
+
+    def setUp(self):
+        try:
+            import numpy  # noqa: F401
+        except ImportError:
+            self.skipTest("numpy not installed")
+
+    def _wm_with_visual(self, n=60, vis_dim=12):
+        from brain.world_model import WorldModelStore
+        wm = WorldModelStore(Path(tempfile.mkdtemp()) / "wm.sqlite",
+                             backend=_DenseBackendStub())
+        for i in range(n):
+            ok = (i % 2 == 0)
+            sv = [((i + j) % 7) / 7.0 for j in range(vis_dim)]
+            ov = [((i + j + 1) % 7) / 7.0 for j in range(vis_dim)]
+            wm.observe(state_text=f"goal=ui{i%4}", action_text=f"screen_click(x={i%3})",
+                       outcome_text=("ok" if ok else "err"), ok=ok,
+                       state_vis=sv, outcome_vis=ov)
+        return wm
+
+    def test_trains_asymmetric_and_saves(self):
+        from brain.sleep import VisualForwardModelTrainer
+        from brain.memory import Memory
+        from brain.forward_model import load_forward_model
+        wm = self._wm_with_visual(60, vis_dim=12)
+        tmp = Path(tempfile.mkdtemp())
+        mem = Memory(tmp / "m.sqlite", backend=_DenseBackendStub())
+        ckpt = tmp / "forward_model_visual"
+        stats = VisualForwardModelTrainer(epochs=30, min_rows=20).run(
+            mem, wm, checkpoint=ckpt, log=lambda _m: None)
+        self.assertTrue(stats["trained"])
+        self.assertEqual(stats["vis_dim"], 12)       # output dim = visual dim
+        self.assertEqual(stats["act_dim"], 8)        # action = dense backend dim
+        loaded = load_forward_model(ckpt)
+        self.assertIsNotNone(loaded)
+        # in_dim must be visual+action (asymmetric), out (emb_dim) = visual.
+        self.assertEqual(loaded.in_dim, 12 + 8)
+        self.assertEqual(loaded.emb_dim, 12)
+        # predict round-trips with the asymmetric shapes
+        out, prob = loaded.predict([0.1] * 12, [0.2] * 8)
+        self.assertEqual(len(out), 12)
+        self.assertTrue(0.0 <= prob <= 1.0)
+        mem.close(); wm.close()
+
+    def test_noops_without_visual_triples(self):
+        from brain.sleep import VisualForwardModelTrainer
+        from brain.memory import Memory
+        from brain.world_model import WorldModelStore
+        # text-only triples → no visual rows → skip
+        wm = WorldModelStore(Path(tempfile.mkdtemp()) / "wm.sqlite",
+                             backend=_DenseBackendStub())
+        for i in range(60):
+            wm.observe("s", "think()", "ok", ok=True)
+        tmp = Path(tempfile.mkdtemp())
+        mem = Memory(tmp / "m.sqlite", backend=_DenseBackendStub())
+        stats = VisualForwardModelTrainer(min_rows=20).run(mem, wm, log=lambda _m: None)
+        self.assertFalse(stats["trained"])
+        mem.close(); wm.close()
+
+    def test_noops_on_nondense_backend(self):
+        from brain.sleep import VisualForwardModelTrainer
+        from brain.memory import Memory
+        from brain.embeddings import TfidfBackend
+        wm = self._wm_with_visual(60)
+        tmp = Path(tempfile.mkdtemp())
+        mem = Memory(tmp / "m.sqlite", backend=TfidfBackend())
+        stats = VisualForwardModelTrainer(min_rows=20).run(mem, wm, log=lambda _m: None)
+        self.assertFalse(stats["trained"])
+        self.assertEqual(stats["reason"], "non-dense backend")
+        mem.close(); wm.close()
+
+
 class ScreenObserverTests(unittest.TestCase):
     """Capture loop + privacy spine — local-only, exclusion, pixel-drop."""
 

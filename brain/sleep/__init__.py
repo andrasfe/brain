@@ -6,6 +6,7 @@ hours: they're the brain's offline maintenance crew.
 from .dreamer import Dreamer
 from .forgetter import Forgetter
 from .forward_model_trainer import ForwardModelTrainer
+from .visual_forward_model_trainer import VisualForwardModelTrainer
 from .mood_regulator import MoodRegulator
 from .purger import ScreenPurger
 from .scheduler import Scheduler
@@ -13,6 +14,7 @@ from .sequence_trainer import ScreenSequenceTrainer
 from .skill_pruner import SkillPruner
 from .vision_teacher import VisionTeacher
 
-__all__ = ["Dreamer", "Forgetter", "ForwardModelTrainer", "MoodRegulator",
+__all__ = ["Dreamer", "Forgetter", "ForwardModelTrainer",
+           "VisualForwardModelTrainer", "MoodRegulator",
            "ScreenPurger", "Scheduler", "ScreenSequenceTrainer", "SkillPruner",
            "VisionTeacher"]

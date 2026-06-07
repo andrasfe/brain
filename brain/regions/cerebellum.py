@@ -59,7 +59,8 @@ class Cerebellum(Region):
     def __init__(self, cfg, llm, world_model: Optional[WorldModelStore] = None,
                  k: int = 3, min_top_sim: float = 0.10,
                  confidence_floor: float = 0.30,
-                 forward_model=None, embedding_backend=None):
+                 forward_model=None, embedding_backend=None,
+                 visual_forward_model=None):
         super().__init__(cfg, llm)  # llm unused — this region never calls it
         self.world_model = world_model
         self.k = k
@@ -71,6 +72,10 @@ class Cerebellum(Region):
         # ForwardModelTrainer; loaded from a checkpoint at construction.
         self.forward_model = forward_model
         self.embedding_backend = embedding_backend
+        # Optional VISUAL forward model (DINOv2 latent space), trained by the
+        # VisualForwardModelTrainer during sleep. Consumed by visual planning
+        # (V3); refreshed in-place after each sleep training pass.
+        self.visual_forward_model = visual_forward_model
 
     def _embed(self, text: str):
         bk = self.embedding_backend

@@ -46,10 +46,16 @@ def _sigmoid(x):
 class ForwardModel:
     """Tiny MLP: [state_emb ; action_emb] -> (outcome_emb_hat, ok_prob)."""
 
-    def __init__(self, emb_dim: int, hidden: int = 64, seed: int = 0):
+    def __init__(self, emb_dim: int, hidden: int = 64, seed: int = 0,
+                 in_dim: Optional[int] = None):
+        # emb_dim = OUTPUT (predicted-state) dim. in_dim = concatenated input
+        # dim, defaulting to 2*emb_dim for the symmetric text model where state
+        # and action share a space. The visual model passes in_dim explicitly
+        # (visual_state_dim + action_text_emb_dim ≠ 2*out_dim).
         self.emb_dim = int(emb_dim)
         self.hidden = int(hidden)
-        d_in = 2 * self.emb_dim
+        self.in_dim = int(in_dim) if in_dim else 2 * self.emb_dim
+        d_in = self.in_dim
         rng = np.random.RandomState(seed)
         # He-ish init
         self.W1 = rng.randn(d_in, hidden).astype(np.float32) * np.sqrt(2.0 / d_in)
@@ -194,7 +200,7 @@ class ForwardModel:
                  W1=self.W1, b1=self.b1, Wo=self.Wo, bo=self.bo,
                  Wk=self.Wk, bk=self.bk, mu=self.mu, sd=self.sd)
         meta = {"kind": "numpy", "emb_dim": self.emb_dim, "hidden": self.hidden,
-                "trained_rows": self.trained_rows}
+                "in_dim": self.in_dim, "trained_rows": self.trained_rows}
         path.with_suffix(".json").write_text(json.dumps(meta))
 
     @classmethod
@@ -207,7 +213,8 @@ class ForwardModel:
         try:
             meta = json.loads(meta_path.read_text())
             data = np.load(str(npz))
-            m = cls(emb_dim=int(meta["emb_dim"]), hidden=int(meta["hidden"]))
+            m = cls(emb_dim=int(meta["emb_dim"]), hidden=int(meta["hidden"]),
+                    in_dim=int(meta.get("in_dim", 2 * int(meta["emb_dim"]))))
             for k in ("W1", "b1", "Wo", "bo", "Wk", "bk", "mu", "sd"):
                 setattr(m, k, data[k])
             m.trained_rows = int(meta.get("trained_rows", 0))
@@ -227,19 +234,22 @@ def mlx_available() -> bool:
 
 def make_forward_model(emb_dim: int, *, backend: str = "auto",
                        hidden: int = 256, depth: int = 2, dropout: float = 0.1,
-                       seed: int = 0):
+                       seed: int = 0, in_dim: Optional[int] = None):
     """Construct a forward model. backend: 'auto' (MLX if available, else
     numpy) | 'mlx' | 'numpy'. The MLX model is the robust GPU-trained net; the
-    numpy model is the dependency-light fallback (smaller default hidden)."""
+    numpy model is the dependency-light fallback (smaller default hidden).
+    `in_dim` overrides the input width (default 2*emb_dim); the visual world
+    model uses it for asymmetric state(vis)+action(text) inputs."""
     backend = (backend or "auto").lower()
     if backend in ("auto", "mlx") and mlx_available():
         from .forward_model_mlx import MLXForwardModel
         return MLXForwardModel(emb_dim=emb_dim, hidden=hidden, depth=depth,
-                               dropout=dropout, seed=seed)
+                               dropout=dropout, seed=seed, in_dim=in_dim)
     if backend == "mlx" and not mlx_available():
         # explicit request but unavailable — fall back loudly via caller logs
         pass
-    return ForwardModel(emb_dim=emb_dim, hidden=min(hidden, 128), seed=seed)
+    return ForwardModel(emb_dim=emb_dim, hidden=min(hidden, 128), seed=seed,
+                        in_dim=in_dim)
 
 
 def load_forward_model(base_path: Path):

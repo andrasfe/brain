@@ -26,6 +26,9 @@ status.json.tmp
 forward_model.npz
 forward_model.json
 forward_model.mlx.safetensors
+forward_model_visual.npz
+forward_model_visual.json
+forward_model_visual.mlx.safetensors
 screen_model.npz
 screen_model.json
 screen_model.mlx.safetensors

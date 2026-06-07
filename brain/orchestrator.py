@@ -131,10 +131,12 @@ class Brain:
         # sleep-trained forward model checkpoint if one exists (dense backend
         # only) so habit-gating uses the learned success probability.
         fwd_model = self._load_forward_model(cfg, backend)
+        vis_fwd_model = self._load_visual_forward_model(cfg, backend)
         self.cerebellum = Cerebellum(cfg, self.llm,
                                        world_model=self.world_model,
                                        forward_model=fwd_model,
-                                       embedding_backend=backend)
+                                       embedding_backend=backend,
+                                       visual_forward_model=vis_fwd_model)
 
         # Predictor (learned Monitor) — imagination-based planning. Off by
         # default; when `planning.enabled` it vetoes deliberate actions the
@@ -176,6 +178,23 @@ class Brain:
         try:
             from .forward_model import load_forward_model
             from .sleep.forward_model_trainer import default_checkpoint
+        except ImportError:
+            return None
+        try:
+            return load_forward_model(default_checkpoint(cfg.db_path))
+        except Exception:
+            return None
+
+    def _load_visual_forward_model(self, cfg: Config, backend):
+        """Load the sleep-trained VISUAL forward-model checkpoint if present.
+        Same model classes as the text forward model (the asymmetric in_dim is
+        stored in the checkpoint meta), so it round-trips through the shared
+        loader. None when absent / no dense backend."""
+        if not getattr(backend, "persistent", False):
+            return None
+        try:
+            from .forward_model import load_forward_model
+            from .sleep.visual_forward_model_trainer import default_checkpoint
         except ImportError:
             return None
         try:

@@ -57,7 +57,8 @@ from brain.orchestrator import Brain  # noqa: E402
 from brain.observer import ScreenObserver  # noqa: E402
 from brain.presence import idle_seconds  # noqa: E402
 from brain.sleep import (  # noqa: E402
-    Dreamer, Forgetter, ForwardModelTrainer, MoodRegulator, ScreenPurger,
+    Dreamer, Forgetter, ForwardModelTrainer, VisualForwardModelTrainer,
+    MoodRegulator, ScreenPurger,
     Scheduler, ScreenSequenceTrainer, SkillPruner, VisionTeacher,
 )
 from brain.status import write_status  # noqa: E402
@@ -84,6 +85,7 @@ class DaemonStats:
     facts_consolidated: int = 0
     prospective_fired: int = 0
     forward_model_trains: int = 0
+    visual_forward_model_trains: int = 0
     screen_model_trains: int = 0
     vision_rules_learned: int = 0
     observations_pruned: int = 0
@@ -154,6 +156,14 @@ class BrainDaemon:
             depth=int(fm_cfg.get("depth", 2)),
             epochs=int(fm_cfg.get("epochs", 200)),
             min_pairs=int((cfg.capture or {}).get("min_train_pairs", 40)),
+        )
+        # Visual JEPA world model trainer (action-conditioned, DINOv2 space).
+        self.visual_forward_model_trainer = VisualForwardModelTrainer(
+            backend=str(fm_cfg.get("backend", "auto")),
+            hidden=int(fm_cfg.get("hidden", 256)),
+            depth=int(fm_cfg.get("depth", 2)),
+            epochs=int(fm_cfg.get("epochs", 200)),
+            min_rows=int(fm_cfg.get("min_rows", 40)),
         )
         # Teacher-student: the executive model curates the student's
         # screen-reading skill during sleep. Only when capture is on.
@@ -499,6 +509,20 @@ class BrainDaemon:
                     self.stats.forward_model_trains += 1
             except Exception as e:
                 self.log(f"  ⚠ forward_model trainer failed: {type(e).__name__}: {e}")
+            # visual forward-model trainer: learn the action-conditioned VISUAL
+            # world model (DINOv2 latent space) from screen-action transitions;
+            # refresh the cerebellum's visual model. No-ops without visual triples.
+            try:
+                vfm = self.visual_forward_model_trainer.run(
+                    self.brain.memory, self.brain.world_model,
+                    cerebellum=getattr(self.brain, "cerebellum", None),
+                    log=lambda m: self.log(f"  {m}"),
+                )
+                if vfm.get("trained"):
+                    self.stats.visual_forward_model_trains += 1
+            except Exception as e:
+                self.log(f"  ⚠ visual_forward_model trainer failed: "
+                         f"{type(e).__name__}: {e}")
             # screen-sequence trainer: learn the dynamics of the user's day
             # (next-screen prediction) from the observation stream; refresh the
             # live occipital model.

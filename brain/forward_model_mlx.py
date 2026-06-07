@@ -67,16 +67,20 @@ class MLXForwardModel:
     kind = "mlx"
 
     def __init__(self, emb_dim: int, hidden: int = 256, depth: int = 2,
-                 dropout: float = 0.1, seed: int = 0):
+                 dropout: float = 0.1, seed: int = 0, in_dim: Optional[int] = None):
+        # emb_dim = OUTPUT (predicted-state) dim. in_dim = concatenated input
+        # width, defaulting to 2*emb_dim (symmetric text model). The visual
+        # model passes in_dim = visual_state_dim + action_text_emb_dim.
         self.emb_dim = int(emb_dim)
         self.hidden = int(hidden)
         self.depth = int(depth)
         self.dropout = float(dropout)
+        self.in_dim = int(in_dim) if in_dim else 2 * self.emb_dim
         mx.random.seed(seed)
-        self.net = _Net(2 * self.emb_dim, self.emb_dim, hidden, depth, dropout)
+        self.net = _Net(self.in_dim, self.emb_dim, hidden, depth, dropout)
         mx.eval(self.net.parameters())
-        self.mu = mx.zeros((2 * self.emb_dim,))
-        self.sd = mx.ones((2 * self.emb_dim,))
+        self.mu = mx.zeros((self.in_dim,))
+        self.sd = mx.ones((self.in_dim,))
         self.trained_rows = 0
 
     # ── inference ─────────────────────────────────────────────────────────────
@@ -192,7 +196,7 @@ class MLXForwardModel:
         mx.save_safetensors(str(weights_path), flat)
         meta = {"kind": "mlx", "emb_dim": self.emb_dim, "hidden": self.hidden,
                 "depth": self.depth, "dropout": self.dropout,
-                "trained_rows": self.trained_rows}
+                "in_dim": self.in_dim, "trained_rows": self.trained_rows}
         path.with_suffix(".json").write_text(json.dumps(meta))
 
     @classmethod
@@ -205,7 +209,8 @@ class MLXForwardModel:
         try:
             meta = json.loads(meta_p.read_text())
             m = cls(emb_dim=int(meta["emb_dim"]), hidden=int(meta["hidden"]),
-                    depth=int(meta["depth"]), dropout=float(meta.get("dropout", 0.1)))
+                    depth=int(meta["depth"]), dropout=float(meta.get("dropout", 0.1)),
+                    in_dim=int(meta.get("in_dim", 2 * int(meta["emb_dim"]))))
             flat = mx.load(str(weights_p))
             m.mu = flat.pop("__mu__")
             m.sd = flat.pop("__sd__")
