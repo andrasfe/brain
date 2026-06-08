@@ -19,6 +19,16 @@ from pathlib import Path
 from typing import List, Optional
 
 
+# torch.hub name → timm model id (same DINOv2 weights). timm is the preferred
+# loader because the facebookresearch hub code uses 3.10+ syntax (`float | None`)
+# that fails to import on Python 3.9.
+_TIMM_NAMES = {
+    "dinov2_vits14": "vit_small_patch14_dinov2.lvd142m",   # 384-dim
+    "dinov2_vitb14": "vit_base_patch14_dinov2.lvd142m",    # 768-dim
+    "dinov2_vitl14": "vit_large_patch14_dinov2.lvd142m",   # 1024-dim
+}
+
+
 class VisualEmbedder:
     def __init__(self, model_name: str = "dinov2_vits14"):
         self.model_name = model_name
@@ -35,16 +45,44 @@ class VisualEmbedder:
         self._tried = True
         try:
             import torch
-            from torchvision import transforms
             self._device = (
                 "mps" if torch.backends.mps.is_available()
                 else ("cuda" if torch.cuda.is_available() else "cpu")
             )
-            # DINOv2 from the official hub repo (downloads weights once).
-            model = torch.hub.load("facebookresearch/dinov2", self.model_name,
-                                   verbose=False)
+            model = self._load_timm() or self._load_hub()
+            if model is None:
+                self._ok = False
+                return False
             model.eval().to(self._device)
             self._model = model
+            self._ok = True
+        except Exception:
+            self._ok = False
+        return self._ok
+
+    def _load_timm(self):
+        """Preferred loader — DINOv2 via timm (Python 3.9-safe)."""
+        try:
+            import timm
+        except Exception:
+            return None
+        try:
+            tid = _TIMM_NAMES.get(self.model_name, self.model_name)
+            model = timm.create_model(tid, pretrained=True, num_classes=0)
+            cfg = timm.data.resolve_model_data_config(model)
+            self._transform = timm.data.create_transform(**cfg, is_training=False)
+            self.dim = int(getattr(model, "num_features", 0)) or 384
+            return model
+        except Exception:
+            return None
+
+    def _load_hub(self):
+        """Fallback — facebookresearch/dinov2 via torch.hub (needs py3.10+)."""
+        try:
+            import torch
+            from torchvision import transforms
+            model = torch.hub.load("facebookresearch/dinov2", self.model_name,
+                                   verbose=False)
             self._transform = transforms.Compose([
                 transforms.Resize(224),
                 transforms.CenterCrop(224),
@@ -52,13 +90,10 @@ class VisualEmbedder:
                 transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225]),
             ])
-            # infer dim from a dry run
-            import numpy as np  # noqa: F401
             self.dim = int(getattr(model, "embed_dim", 0)) or 384
-            self._ok = True
+            return model
         except Exception:
-            self._ok = False
-        return self._ok
+            return None
 
     @property
     def available(self) -> bool:
