@@ -309,7 +309,8 @@ class BrainDaemon:
                     self.log(
                         f"  👁 capture [{res.get('trigger')}] "
                         f"{res.get('model_tier')} model "
-                        f"({res.get('model') or 'none'}) → {res.get('content')}")
+                        f"({res.get('model') or 'none'}) "
+                        f"dist={res.get('content_dist')} → {res.get('content')}")
             except Exception as e:
                 self.log(f"[daemon] observer error: {e}")
 

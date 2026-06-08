@@ -47,9 +47,10 @@ _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0", ""}
 # Reasoning-model preamble lines we never want in an activity label.
 _PREAMBLE_RE = re.compile(
     r"^\s*(\d+[.)]\s|[-*]\s|the user (wants|is asking|is trying)|"
-    r"i (need|should|will|see)\b|let me\b|okay,?\b|first,?\b|"
-    r"based on (the|this)|to (answer|describe)|thinking|analysis|"
-    r"here('s| is)\b|step \d)",
+    r"i (need|should|will|see)\b|we (need|should|can|have|could)\b|let me\b|"
+    r"okay,?\b|first,?\b|based on (the|this)|given (the|that|ground)|"
+    r"synthesize|patterns? include|to (answer|describe)|"
+    r"thinking|analysis|here('s| is)\b|step \d)",
     re.IGNORECASE,
 )
 
@@ -84,19 +85,30 @@ def clean_vision_text(text: str) -> str:
     and 'the user is…' niceties."""
     if not text:
         return ""
-    text = text.strip().strip('"').strip("'")
+    raw_full = text.strip()                      # keep quotes for span extraction
+    text = raw_full.strip('"').strip("'")
     lines = []
     for raw in text.split("\n"):
         line = re.sub(r"^\s*(\d+[.)]|[-*+])\s+", "", raw).strip().strip('"').strip("'")
         line = _strip_markup(line)
         if line:
             lines.append(line)
-    # Prefer the LAST substantive non-preamble line (the conclusion).
+    # 1) Prefer the LAST substantive non-preamble line (a clean answer from the
+    #    strong model lands here, keeping the full sentence incl. any title).
     for line in reversed(lines):
         if len(line) >= 8 and not _PREAMBLE_RE.match(line):
             line = _NICETY_RE.sub("", _strip_markup(line)).strip()
             return (line[0].upper() + line[1:])[:200] if line else line
-    # Fallback: sentence-split the whole blob, last non-preamble sentence.
+    # 2) The line is all rationalization (weak model): reasoning models bury the
+    #    real answer in quotes — "We need concise: \"The user is reading X.\"".
+    #    Take the longest quoted span that isn't itself preamble.
+    quoted = [q.strip() for q in re.findall(r'"([^"]{15,200})"', raw_full)
+              if not _PREAMBLE_RE.match(q.strip())]
+    if quoted:
+        best = _NICETY_RE.sub("", _strip_markup(max(quoted, key=len))).strip()
+        if len(best) >= 8:
+            return (best[0].upper() + best[1:])[:200]
+    # 3) Fallback: sentence-split the whole blob, last non-preamble sentence.
     for c in reversed(re.split(r"(?<=[.!?])\s+", " ".join(lines))):
         c = _strip_markup(c.strip())
         if len(c) >= 8 and not _PREAMBLE_RE.match(c):
@@ -192,7 +204,7 @@ class ScreenObserver:
                  vision_model_strong: str = "",
                  change_detect: bool = True,
                  deep_read_on_change: bool = True,
-                 content_change_threshold: float = 0.12,
+                 content_change_threshold: float = 0.05,
                  visual_embedder=None,
                  time_fn=time.monotonic):
         self.visual_embedder = visual_embedder
@@ -369,8 +381,18 @@ class ScreenObserver:
         # Did the screen CONTENT change meaningfully (not just the app)? This is
         # what decides whether to spend the strong model — so reading a feed for
         # hours still gets a deep read each time the content actually changes.
-        changed = content_changed(vis_vec, self._last_described_vec,
-                                   app_switched, self.content_change_threshold)
+        # We compute the raw DINOv2 distance explicitly so it can be logged and
+        # the threshold calibrated against real screenshots (which cluster tight).
+        content_dist = None
+        if vis_vec is not None and self._last_described_vec is not None:
+            from .screen_model import cosine_distance
+            content_dist = round(float(cosine_distance(
+                vis_vec, self._last_described_vec)), 4)
+        changed = bool(
+            app_switched
+            or (vis_vec is not None and self._last_described_vec is None)
+            or (content_dist is not None
+                and content_dist >= self.content_change_threshold))
         use_strong = (changed and self.deep_read_on_change
                       and bool(self.vision_model_strong))
 
@@ -435,6 +457,7 @@ class ScreenObserver:
                            ("content_change" if changed else "timer"),
                 "model": model,
                 "model_tier": "strong" if use_strong else "fast",
+                "content_dist": content_dist,
                 "tags": tags}
 
     def stats(self) -> dict[str, Any]:
