@@ -219,7 +219,8 @@ class BrainDaemon:
                     mem.conn.execute("PRAGMA journal_mode=WAL")
                 except Exception:
                     pass
-                return {"cfg": _cfg, "llm": wllm, "memory": mem}
+                return {"cfg": _cfg, "llm": wllm, "memory": mem,
+                        "log": lambda m: self.log(m)}
 
             self.worker = Worker(
                 self.job_queue, DEFAULT_HANDLERS, ctx_factory=_ctx_factory,

@@ -133,6 +133,9 @@ def run_deep_read(payload: dict, ctx: dict) -> None:
             blob = None
     store_screen_observation(memory, app, description, embedding=blob,
                              salience=0.6, agency=agency)
+    log = ctx.get("log")
+    if log:
+        log(f"  🧠 deep-read [{app}/{agency}] → {description[:120]}")
 
 
 DEFAULT_HANDLERS = {"deep_read": run_deep_read}
