@@ -148,12 +148,18 @@ capture:
   min_interval_seconds: 8     # debounce floor (activity/fallback; app-switch bypasses)
   activity_window_seconds: 8  # idle <= this (and >= 1s) counts as "just settled"
   change_detect: true         # skip the VLM+embed when the screen is ~unchanged
-  # Hybrid vision: the fast reflex model reads routine frames; the strong
-  # executive model is spent only on app-switches (the informative moments
-  # where reading the new screen correctly matters most). Both are vision-
-  # capable in LM Studio; the reflex one is just faster.
-  vision_model: ""            # routine frames — blank = reflex-tier model
-  vision_model_strong: ""     # app-switch frames — blank = executive-tier model
+  # Hybrid vision: the fast reflex model reads minor-change frames; the strong
+  # executive model is spent when the screen CONTENT changes meaningfully (new
+  # post/page/thread) — see deep_read_on_change below. Both are vision-capable
+  # in LM Studio; the reflex one is just faster.
+  vision_model: ""            # minor-change frames — blank = reflex-tier model
+  vision_model_strong: ""     # content-change frames — blank = executive-tier model
+  # Deep reads: spend the strong model whenever the screen CONTENT changes
+  # meaningfully, not just on app-switches — so browsing one site for hours
+  # still gets substantive reads of WHAT you're reading. Needs DINOv2
+  # (visual_embed: dinov2); else falls back to app-switch only.
+  deep_read_on_change: true
+  content_change_threshold: 0.12   # DINOv2 cosine distance that counts as "new content"
   # Screen-state representation for the sequence model:
   #   "none"   — embed the text description (EmbeddingGemma) [default]
   #   "dinov2" — embed the screenshot with local DINOv2 (needs torch; no uploads)

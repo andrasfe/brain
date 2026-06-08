@@ -132,6 +132,56 @@ def privacy_ok(cfg) -> "tuple[bool, str]":
                    "provider (lmstudio/ollama) or a local embedding backend.")
 
 
+# Boilerplate words the VLM emits that aren't useful topic tags.
+_TOPIC_STOP = {
+    "reading", "browsing", "viewing", "looking", "scrolling", "using", "doing",
+    "user", "screen", "page", "window", "app", "application", "website", "site",
+    "content", "currently", "appears", "shows", "showing", "display", "displays",
+    "with", "that", "this", "what", "they", "their", "there", "from", "into",
+    "some", "post", "posts", "feed", "view", "open", "click", "while", "about",
+    "main", "text", "list", "menu", "left", "right", "top", "bottom",
+}
+
+
+def topic_tags(description: str, limit: int = 6) -> list[str]:
+    """Extract retrievable topic tags from a content description — #hashtags,
+    @handles, and salient words — so memory can be searched by SUBJECT, not just
+    by which app was focused. Deterministic, no LLM."""
+    if not description:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(key: str) -> None:
+        k = key.lower().strip()
+        if len(k) < 3 or k in seen or k in _TOPIC_STOP:
+            return
+        seen.add(k)
+        out.append(f"topic:{k}")
+
+    for h in re.findall(r"[#@](\w{2,})", description):
+        _add(h)
+    for w in re.findall(r"[A-Za-z][A-Za-z0-9\-]{3,}", description):
+        _add(w)
+    return out[:limit]
+
+
+def content_changed(vec, last_vec, app_switched: bool, threshold: float) -> bool:
+    """Did the SCREEN CONTENT meaningfully change since the last described
+    frame? Uses DINOv2 cosine distance — so scrolling to a new post / opening a
+    new thread counts as a change even within the same app (the case app-switch
+    detection misses entirely). Falls back to the app-switch signal when no
+    visual embedding is available."""
+    if app_switched:
+        return True
+    if vec is None:
+        return False
+    if last_vec is None:
+        return True
+    from .screen_model import cosine_distance
+    return cosine_distance(vec, last_vec) >= threshold
+
+
 class ScreenObserver:
     def __init__(self, cfg, llm, memory, embodiment, *,
                  interval_seconds: float = 60.0,
@@ -141,13 +191,21 @@ class ScreenObserver:
                  vision_model: str = "",
                  vision_model_strong: str = "",
                  change_detect: bool = True,
+                 deep_read_on_change: bool = True,
+                 content_change_threshold: float = 0.12,
                  visual_embedder=None,
                  time_fn=time.monotonic):
         self.visual_embedder = visual_embedder
-        # Strong (executive) vision model used on the informative frames
-        # (app-switch); the fast reflex model handles routine frames. Blank
+        # Strong (executive) vision model: spent on frames where the screen
+        # CONTENT changed meaningfully (new post / page / thread), not just on
+        # app-switches — so sustained single-app browsing (X, Reddit) still gets
+        # deep reads. The fast reflex model handles minor changes. Blank strong
         # falls back to the executive tier (mirrors vision_model → reflex).
         self.vision_model_strong = vision_model_strong or cfg.models.get("executive", "")
+        self.deep_read_on_change = deep_read_on_change
+        self.content_change_threshold = float(content_change_threshold)
+        self._last_described_vec = None   # DINOv2 vec of the last frame we read
+        self.cfg = cfg
         self.cfg = cfg
         self.llm = llm
         self.memory = memory
@@ -293,17 +351,28 @@ class ScreenObserver:
             return {"captured": False, "reason": "unchanged"}
 
         # DINOv2 image embedding (the screen-state vector) BEFORE pixel-drop,
-        # when a visual embedder is configured + available.
+        # when a visual embedder is configured + available. Kept raw (vis_vec)
+        # for the content-change comparison, and packed (img_blob) for storage.
         img_blob = None
+        vis_vec = None
         if self.visual_embedder is not None and path:
             try:
                 if getattr(self.visual_embedder, "available", False):
-                    vec = self.visual_embedder.embed(path)
-                    if vec:
+                    vis_vec = self.visual_embedder.embed(path)
+                    if vis_vec:
                         from .embeddings import _pack_floats
-                        img_blob = _pack_floats(vec)
+                        img_blob = _pack_floats(vis_vec)
             except Exception:
+                vis_vec = None
                 img_blob = None
+
+        # Did the screen CONTENT change meaningfully (not just the app)? This is
+        # what decides whether to spend the strong model — so reading a feed for
+        # hours still gets a deep read each time the content actually changes.
+        changed = content_changed(vis_vec, self._last_described_vec,
+                                   app_switched, self.content_change_threshold)
+        use_strong = (changed and self.deep_read_on_change
+                      and bool(self.vision_model_strong))
 
         description = ""
         model = ""
@@ -312,23 +381,28 @@ class ScreenObserver:
                 from .knowledge import render_rules
                 rules = render_rules(self.cfg.db_path)
                 app_known = app or "an unknown app"
-                # Hybrid vision: spend the smart (executive) model only on the
-                # informative frames — app-switches — where reading the new
-                # screen correctly matters most. Routine frames use the fast
-                # reflex model. Falls back to fast if no strong model set.
-                model = (self.vision_model_strong
-                         if (app_switched and self.vision_model_strong)
-                         else self.vision_model)
-                raw = self.llm.describe_image(
-                    model,
-                    f"The macOS frontmost application is '{app_known}' (read from "
-                    "the menu bar — this is GROUND TRUTH; do not name a different "
-                    "app).\n"
-                    f"Where to look on screen:\n{rules}\n\n"
-                    f"Reply with ONE short sentence and nothing else: what is the "
-                    f"user doing in {app_known}? No preamble, no analysis, no list.",
-                    path,
-                )
+                model = self.vision_model_strong if use_strong else self.vision_model
+                if use_strong:
+                    # Deep, content-focused read: WHAT is being read/done, not
+                    # just which app. The substance — topics, titles, threads.
+                    instruction = (
+                        f"The macOS frontmost app is '{app_known}' (GROUND TRUTH; "
+                        "do not rename it).\n"
+                        f"Where to look on screen:\n{rules}\n\n"
+                        "Describe WHAT THE USER IS READING OR DOING — the actual "
+                        "CONTENT, not just the app. Name the topic/subject, the "
+                        "key headlines, post titles, usernames or threads visible, "
+                        "and the gist. 1-2 sentences. For a feed (X, Reddit, news) "
+                        "name the specific topics and the most notable posts. "
+                        "Never transcribe passwords, secrets, tokens, or full "
+                        "private messages.")
+                else:
+                    instruction = (
+                        f"The macOS frontmost app is '{app_known}' (GROUND TRUTH).\n"
+                        f"Where to look on screen:\n{rules}\n\n"
+                        "Reply with ONE short sentence: what is on screen / what "
+                        "is the user doing? No preamble, no list.")
+                raw = self.llm.describe_image(model, instruction, path)
                 description = clean_vision_text(raw)
         finally:
             # PIXEL-DROP: delete the screenshot no matter what happened above.
@@ -338,23 +412,30 @@ class ScreenObserver:
                 except OSError:
                     pass
 
+        # Remember the embedding of the frame we actually read, so the NEXT
+        # content-change comparison is against the last *described* screen.
+        if description and vis_vec is not None:
+            self._last_described_vec = vis_vec
+
         rendered = obs.render_text(limit=12)
         content = description or rendered or f"(screen: {app or 'unknown'})"
         content = f"[{app or 'unknown'}] {content}"[:500]
 
+        tags = [f"app:{(app or 'unknown').lower()}"] + topic_tags(description)
         self.memory.store(
             task="screen_observation", kind="activity",
-            content=content, salience=0.4,
+            content=content, salience=0.4 + (0.15 if use_strong else 0.0),
             mem_type=OBSERVATION,
-            tags=[f"app:{(app or 'unknown').lower()}"],
+            tags=tags,
             embedding=img_blob,   # DINOv2 image vector when enabled, else None
         )
         self.captured += 1
         return {"captured": True, "app": app, "content": content[:120],
-                "trigger": "app_switch" if app_switched else "timer",
+                "trigger": "app_switch" if app_switched else
+                           ("content_change" if changed else "timer"),
                 "model": model,
-                "model_tier": ("strong" if model and model == self.vision_model_strong
-                               else "fast")}
+                "model_tier": "strong" if use_strong else "fast",
+                "tags": tags}
 
     def stats(self) -> dict[str, Any]:
         return {"captured": self.captured, "skipped": self.skipped,

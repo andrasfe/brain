@@ -2614,6 +2614,70 @@ class EffectorAffordanceTests(unittest.TestCase):
         self.assertIn("shell{command}", text)
 
 
+class ContentAwareReadingTests(unittest.TestCase):
+    """Deep reads driven by CONTENT change, not app-switch; topic tagging."""
+
+    def test_topic_tags_extracts_subject(self):
+        from brain.observer import topic_tags
+        tags = topic_tags("Reading a Reddit thread about the Apple M5 MacBook")
+        self.assertIn("topic:apple", tags)
+        self.assertIn("topic:macbook", tags)
+        # boilerplate is filtered
+        self.assertNotIn("topic:reading", tags)
+        self.assertEqual(topic_tags(""), [])
+
+    def test_content_changed_signal(self):
+        from brain.observer import content_changed
+        self.assertTrue(content_changed(None, None, True, 0.12))      # app switch
+        self.assertFalse(content_changed(None, [0.1], False, 0.12))    # no vec
+        self.assertTrue(content_changed([0.1, 0.2], None, False, 0.12))  # first
+        self.assertTrue(content_changed([1, 0, 0], [0, 1, 0], False, 0.12))   # far
+        self.assertFalse(content_changed([1, 0, 0], [1, 0, 0.0], False, 0.12))  # near
+
+    def test_strong_model_fires_on_content_change_same_app(self):
+        try:
+            import numpy  # noqa: F401 — cosine_distance needs it
+        except ImportError:
+            self.skipTest("numpy not installed")
+        from brain.observer import ScreenObserver
+        from brain.memory import Memory
+        from brain.embeddings import TfidfBackend
+        from brain.config import Config
+        from afferent import Embodiment, FakeBackend
+        from afferent.types import Observation, Frame
+        tmp = Path(tempfile.mkdtemp())
+        # three frames, SAME app (Google Chrome) — app never switches
+        paths = []
+        for i in range(3):
+            p = tmp / f"f{i}.png"; p.write_bytes(b"png" + bytes([i]))
+            paths.append(str(p))
+        cfg = Config(raw={"sandbox_dir": str(tmp)}, api_key="",
+                     base_url="http://localhost:1234/v1", require_auth=False,
+                     extra_headers={}, models={"reflex": "fast", "executive": "smart"},
+                     timeout_seconds=10, max_retries=0, sandbox_dir=tmp,
+                     db_path=tmp / "m.sqlite", loop={},
+                     memory={"embedding_backend": "openrouter"}, effectors={}, regions={})
+        emb = Embodiment(FakeBackend(script=[
+            Observation(ts=float(i), frontmost_app="Google Chrome",
+                        frame=Frame(id=f"f{i}", ts=float(i), path=paths[i]))
+            for i in range(3)]), read_only=True)
+        mem = Memory(cfg.db_path, backend=TfidfBackend())
+        llm = MagicMock(); llm.describe_image.return_value = "Reading a thread about X"
+        vemb = MagicMock(); vemb.available = True
+        # v1 (first→strong), v2 near v1 (→fast), v3 far (→strong)
+        vemb.embed.side_effect = [[1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
+        ob = ScreenObserver(cfg, llm, mem, emb, interval_seconds=0,
+                            vision_model="fast", vision_model_strong="smart",
+                            content_change_threshold=0.12, visual_embedder=vemb)
+        ob._fingerprint = lambda _p: None    # disable hash dedup
+        models = []
+        for _ in range(3):
+            ob.maybe_capture(force=True)
+            models.append(llm.describe_image.call_args[0][0])
+        self.assertEqual(models, ["smart", "fast", "smart"])  # content-driven, same app
+        mem.close()
+
+
 class ScreenObserverTests(unittest.TestCase):
     """Capture loop + privacy spine — local-only, exclusion, pixel-drop."""
 
