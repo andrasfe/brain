@@ -1806,6 +1806,97 @@ class EmbodimentIntegrationTests(unittest.TestCase):
             brain.close()
 
 
+class JobQueueTests(unittest.TestCase):
+    """Durable SQLite job queue — priority, lease, dedup, TTL, retry."""
+
+    def _q(self):
+        from brain.jobqueue import JobQueue
+        return JobQueue(Path(tempfile.mkdtemp()) / "jobs.sqlite")
+
+    def test_priority_then_fifo_ordering(self):
+        q = self._q()
+        q.enqueue("deep_read", {"f": 1}, priority=0, now=1.0)
+        q.enqueue("deep_read", {"f": 2}, priority=5, now=2.0)   # higher priority
+        q.enqueue("deep_read", {"f": 3}, priority=0, now=3.0)
+        self.assertEqual(q.claim(now=10.0)["payload"]["f"], 2)   # priority wins
+        self.assertEqual(q.claim(now=10.0)["payload"]["f"], 1)   # then oldest
+        self.assertEqual(q.claim(now=10.0)["payload"]["f"], 3)
+        self.assertIsNone(q.claim(now=10.0))
+        q.close()
+
+    def test_kind_filter(self):
+        q = self._q()
+        q.enqueue("a", {}, now=1.0)
+        q.enqueue("b", {}, now=2.0)
+        self.assertEqual(q.claim(kinds=["b"], now=10.0)["kind"], "b")
+        q.close()
+
+    def test_lease_hides_then_reaps_on_expiry(self):
+        q = self._q()
+        q.enqueue("x", {}, now=1.0)
+        j = q.claim(owner="w1", lease_seconds=30, now=100.0)
+        self.assertIsNotNone(j)
+        self.assertIsNone(q.claim(now=110.0))            # leased → hidden
+        again = q.claim(now=200.0)                       # lease expired → reaped
+        self.assertEqual(again["id"], j["id"])
+        self.assertEqual(again["attempts"], 2)           # re-claim increments
+        q.close()
+
+    def test_complete_removes_from_queue(self):
+        q = self._q()
+        i = q.enqueue("x", {}, now=1.0)
+        j = q.claim(now=2.0)
+        q.complete(j["id"], now=3.0)
+        self.assertIsNone(q.claim(now=4.0))
+        self.assertEqual(q.depth(), 0)
+        q.close()
+
+    def test_fail_retries_then_dead_letters(self):
+        q = self._q()
+        q.enqueue("x", {}, max_attempts=2, now=1.0)
+        j1 = q.claim(now=2.0); self.assertEqual(j1["attempts"], 1)
+        self.assertEqual(q.fail(j1["id"], "boom", now=3.0), "pending")  # retry
+        j2 = q.claim(now=4.0); self.assertEqual(j2["attempts"], 2)
+        self.assertEqual(q.fail(j2["id"], "boom", now=5.0), "failed")   # dead-letter
+        self.assertIsNone(q.claim(now=6.0))
+        q.close()
+
+    def test_dedup_coalesces_pending(self):
+        q = self._q()
+        a = q.enqueue("deep_read", {"f": 1}, dedup_key="win:chrome", priority=1, now=1.0)
+        b = q.enqueue("deep_read", {"f": 2}, dedup_key="win:chrome", priority=9, now=2.0)
+        self.assertEqual(a, b)                          # same job, coalesced
+        self.assertEqual(q.depth(), 1)
+        j = q.claim(now=10.0)
+        self.assertEqual(j["payload"]["f"], 2)          # freshest payload
+        self.assertEqual(j["priority"], 9)              # lifted to max priority
+        q.close()
+
+    def test_ttl_drops_stale_jobs_on_claim(self):
+        q = self._q()
+        q.enqueue("x", {}, not_after_ts=50.0, now=1.0)   # expires at t=50
+        self.assertIsNone(q.claim(now=100.0))            # past TTL → dropped, not served
+        self.assertEqual(q.stats().get("dropped"), 1)
+        q.close()
+
+    def test_purge_drops_expired_and_deletes_old_finished(self):
+        q = self._q()
+        i = q.enqueue("x", {}, now=1.0)
+        j = q.claim(now=2.0); q.complete(j["id"], now=3.0)
+        # done row older than retention → deleted
+        out = q.purge(now=3.0 + 86400.0 + 1)
+        self.assertEqual(out["deleted"], 1)
+        q.close()
+
+    def test_depth_and_oldest_age(self):
+        q = self._q()
+        q.enqueue("x", {}, now=10.0)
+        q.enqueue("x", {}, now=20.0)
+        self.assertEqual(q.depth(), 2)
+        self.assertEqual(q.oldest_age(now=30.0), 20.0)   # 30 - 10
+        q.close()
+
+
 class ImaginationTests(unittest.TestCase):
     """Phase 0 — shared planning/replay substrate (pure-Python, no numpy)."""
 
