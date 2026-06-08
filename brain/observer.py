@@ -202,36 +202,66 @@ def crop_box(win, img_px, disp_pts, min_side: int = 40):
     return (left, top, right, bottom)
 
 
-def build_read_instruction(rules: str, app: str, deep: bool) -> str:
+def agency_of(idle: Optional[float], activity_window: float) -> str:
+    """Classify a screen change by INPUT RECENCY (not by asking the VLM):
+      - 'active'  : the user acted within the activity window → human-driven.
+      - 'passive' : present but no recent input → the screen changed on its own
+                    (a running process/logs, a feed, an animation, a ping).
+    idle is None (unknown, e.g. a direct run.py task) → treat as active."""
+    if idle is None:
+        return "active"
+    return "active" if idle <= activity_window else "passive"
+
+
+def build_read_instruction(rules: str, app: str, deep: bool,
+                           agency: str = "active") -> str:
     """The VLM prompt for a screen read. `deep` (strong model) captures the
-    actual CONTENT; the shallow form is a quick one-liner. Shared by the inline
+    actual CONTENT; the shallow form is a quick one-liner. `agency` frames it
+    honestly: human action vs autonomous screen activity. Shared by the inline
     fast path and the deferred deep_read worker so they stay in lock-step."""
     app_known = app or "an unknown app"
-    if deep:
-        return (
-            f"The macOS frontmost app is '{app_known}' (GROUND TRUTH; do not "
+    head = (f"The macOS frontmost app is '{app_known}' (GROUND TRUTH; do not "
             "rename it).\n"
-            f"Where to look on screen:\n{rules}\n\n"
-            "Describe WHAT THE USER IS READING OR DOING — the actual CONTENT, "
-            "not just the app. Name the topic/subject, the key headlines, post "
-            "titles, usernames or threads visible, and the gist. 1-2 sentences. "
-            "For a feed (X, Reddit, news) name the specific topics and the most "
-            "notable posts. Never transcribe passwords, secrets, tokens, or "
-            "full private messages.")
-    return (
-        f"The macOS frontmost app is '{app_known}' (GROUND TRUTH).\n"
-        f"Where to look on screen:\n{rules}\n\n"
-        "Reply with ONE short sentence: what is on screen / what is the user "
-        "doing? No preamble, no list.")
+            f"Where to look on screen:\n{rules}\n\n")
+    passive = (agency == "passive")
+    actor = ("The user is NOT actively interacting right now (no recent "
+             "keyboard/mouse input) — the screen may be updating on its own "
+             "(a running process/logs, a feed, a notification, a video). "
+             if passive else "")
+    if deep:
+        if passive:
+            return (head + actor +
+                    "Describe WHAT IS HAPPENING ON SCREEN — the content and its "
+                    "topic/gist — and note whether it looks like automated output "
+                    "rather than a user action. 1-2 sentences. Never transcribe "
+                    "passwords, secrets, tokens, or full private messages.")
+        return (head +
+                "Describe WHAT THE USER IS READING OR DOING — the actual CONTENT, "
+                "not just the app. Name the topic/subject, the key headlines, post "
+                "titles, usernames or threads visible, and the gist. 1-2 sentences. "
+                "For a feed (X, Reddit, news) name the specific topics and the most "
+                "notable posts. Never transcribe passwords, secrets, tokens, or "
+                "full private messages.")
+    if passive:
+        return (head + actor +
+                "Reply with ONE short sentence: what is happening on screen on "
+                "its own? No preamble.")
+    return (head +
+            "Reply with ONE short sentence: what is on screen / what is the user "
+            "doing? No preamble, no list.")
 
 
 def store_screen_observation(memory, app: str, description: str,
-                             embedding=None, salience: float = 0.55) -> str:
+                             embedding=None, salience: float = 0.55,
+                             agency: Optional[str] = None) -> str:
     """Persist one screen observation: [app]-prefixed content + topic tags +
-    optional DINOv2 embedding. Used by both the inline path and the worker."""
+    optional agency tag (human-driven vs autonomous) + optional DINOv2
+    embedding. Used by both the inline path and the worker."""
     content = (description or f"(screen: {app or 'unknown'})")
     content = f"[{app or 'unknown'}] {content}"[:500]
     tags = [f"app:{(app or 'unknown').lower()}"] + topic_tags(description)
+    if agency:
+        tags.append(f"agency:{agency}")
     memory.store(task="screen_observation", kind="activity", content=content,
                  salience=salience, mem_type=OBSERVATION, tags=tags,
                  embedding=embedding)
@@ -581,6 +611,10 @@ class ScreenObserver:
 
         trigger = ("app_switch" if app_switched
                    else ("content_change" if changed else "timer"))
+        # Agency: did the USER drive this change (recent input) or did the
+        # screen change on its own (script logs / feed / animation)? Cheap,
+        # from input-recency — never asked of the VLM.
+        agency = agency_of(idle, self.activity_window_seconds)
 
         # ── DEFERRED deep read: enqueue the slow strong read off the tick ──
         # Spool the focused-window crop, enqueue a deep_read job, drop the full
@@ -598,10 +632,13 @@ class ScreenObserver:
                     pass
             if spool:
                 try:
+                    # Human-driven reads outrank autonomous ones in the queue.
+                    pr = (10 if app_switched else (6 if agency == "active" else 3))
                     self.job_queue.enqueue(
                         "deep_read",
-                        {"spool": spool, "app": app, "vec": vis_vec},
-                        priority=10 if app_switched else 5,
+                        {"spool": spool, "app": app, "vec": vis_vec,
+                         "agency": agency},
+                        priority=pr,
                         dedup_key=f"win:{(app or 'unknown').lower()}",
                         not_after_ts=now + self.deep_read_ttl_seconds)
                     self.job_queue.trim("deep_read", self.max_queued_reads)
@@ -614,7 +651,7 @@ class ScreenObserver:
                 return {"captured": True, "queued": True, "app": app,
                         "trigger": trigger, "model": self.vision_model_strong,
                         "model_tier": "strong(queued)", "content_dist": content_dist,
-                        "spool": spool}
+                        "agency": agency, "spool": spool}
             # spool failed → fall through to an inline read on read_path
 
         # ── INLINE read (fast frames, or strong when no queue) ──
@@ -625,7 +662,8 @@ class ScreenObserver:
                 from .knowledge import render_rules
                 model = self.vision_model_strong if use_strong else self.vision_model
                 instruction = build_read_instruction(
-                    render_rules(self.cfg.db_path), app, deep=use_strong)
+                    render_rules(self.cfg.db_path), app, deep=use_strong,
+                    agency=agency)
                 raw = self.llm.describe_image(model, instruction, read_path)
                 description = clean_vision_text(raw)
         finally:
@@ -643,12 +681,12 @@ class ScreenObserver:
         rendered = obs.render_text(limit=12)
         content = store_screen_observation(
             self.memory, app, description or rendered, embedding=img_blob,
-            salience=0.4 + (0.15 if use_strong else 0.0))
+            salience=0.4 + (0.15 if use_strong else 0.0), agency=agency)
         self.captured += 1
         return {"captured": True, "app": app, "content": content[:120],
                 "trigger": trigger, "model": model,
                 "model_tier": "strong" if use_strong else "fast",
-                "content_dist": content_dist}
+                "content_dist": content_dist, "agency": agency}
 
     def stats(self) -> dict[str, Any]:
         return {"captured": self.captured, "skipped": self.skipped,

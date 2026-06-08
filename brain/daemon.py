@@ -390,7 +390,7 @@ class BrainDaemon:
                     tail = ("→ queued for deep read" if res.get("queued")
                             else f"→ {res.get('content')}")
                     self.log(
-                        f"  👁 capture [{res.get('trigger')}] "
+                        f"  👁 capture [{res.get('trigger')}/{res.get('agency')}] "
                         f"{res.get('model_tier')} model "
                         f"({res.get('model') or 'none'}) "
                         f"dist={res.get('content_dist')} {tail}")

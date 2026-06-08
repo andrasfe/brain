@@ -2845,6 +2845,32 @@ class ContentAwareReadingTests(unittest.TestCase):
         self.assertNotIn("topic:reading", tags)
         self.assertEqual(topic_tags(""), [])
 
+    def test_agency_from_input_recency(self):
+        from brain.observer import agency_of
+        self.assertEqual(agency_of(2.0, 8.0), "active")    # recent input
+        self.assertEqual(agency_of(40.0, 8.0), "passive")  # no recent input
+        self.assertEqual(agency_of(None, 8.0), "active")   # unknown → active
+
+    def test_prompt_frames_agency_honestly(self):
+        from brain.observer import build_read_instruction
+        passive = build_read_instruction("r", "Terminal", deep=True, agency="passive")
+        active = build_read_instruction("r", "Chrome", deep=True, agency="active")
+        self.assertIn("NOT actively interacting", passive)
+        self.assertIn("automated output", passive)
+        self.assertIn("WHAT THE USER IS READING OR DOING", active)
+
+    def test_observation_carries_agency_tag(self):
+        from brain.observer import store_screen_observation
+        from brain.memory import Memory, OBSERVATION
+        from brain.embeddings import TfidfBackend
+        mem = Memory(Path(tempfile.mkdtemp()) / "m.sqlite", backend=TfidfBackend())
+        store_screen_observation(mem, "Terminal", "logs streaming", agency="passive")
+        row = mem.conn.execute(
+            "SELECT tags FROM episodes WHERE mem_type=? ORDER BY id DESC LIMIT 1",
+            (OBSERVATION,)).fetchone()
+        self.assertIn("agency:passive", row["tags"])
+        mem.close()
+
     def test_content_changed_signal(self):
         from brain.observer import content_changed
         self.assertTrue(content_changed(None, None, True, 0.12))      # app switch

@@ -107,6 +107,7 @@ def run_deep_read(payload: dict, ctx: dict) -> None:
     spool = payload.get("spool")
     app = payload.get("app") or "unknown"
     vec = payload.get("vec")
+    agency = payload.get("agency") or "active"
 
     if not spool or not os.path.exists(spool):
         return  # the screen is long gone; nothing to read
@@ -114,7 +115,8 @@ def run_deep_read(payload: dict, ctx: dict) -> None:
              or cfg.models.get("executive", ""))
     description = ""
     try:
-        instruction = build_read_instruction(render_rules(cfg.db_path), app, deep=True)
+        instruction = build_read_instruction(render_rules(cfg.db_path), app,
+                                             deep=True, agency=agency)
         raw = llm.describe_image(model, instruction, spool)
         description = clean_vision_text(raw)
     finally:
@@ -129,7 +131,8 @@ def run_deep_read(payload: dict, ctx: dict) -> None:
             blob = _pack_floats(vec)
         except Exception:
             blob = None
-    store_screen_observation(memory, app, description, embedding=blob, salience=0.6)
+    store_screen_observation(memory, app, description, embedding=blob,
+                             salience=0.6, agency=agency)
 
 
 DEFAULT_HANDLERS = {"deep_read": run_deep_read}
