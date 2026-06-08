@@ -55,6 +55,8 @@ from brain.inputs import (  # noqa: E402
 from brain.inputs.classifier import ClassifierRules  # noqa: E402
 from brain.orchestrator import Brain  # noqa: E402
 from brain.observer import ScreenObserver  # noqa: E402
+from brain.jobqueue import JobQueue  # noqa: E402
+from brain.workers import Worker, DEFAULT_HANDLERS  # noqa: E402
 from brain.presence import idle_seconds  # noqa: E402
 from brain.sleep import (  # noqa: E402
     Dreamer, Forgetter, ForwardModelTrainer, VisualForwardModelTrainer,
@@ -193,6 +195,37 @@ class BrainDaemon:
         self.presence_sleep = bool(cap_cfg.get("enabled")) and \
             bool(cap_cfg.get("presence_sleep", True))
         self._user_present: Optional[bool] = None
+
+        # ── async job queue + worker: slow strong reads run off the tick ──────
+        # The queue defers the 27b screen reads so the daemon never blocks; a
+        # worker drains them — gated to run aggressively during sleep and only
+        # opportunistically while you're active (backlog-driven). Disabled when
+        # capture is off or explicitly turned off.
+        self.job_queue = None
+        self.worker = None
+        defer_strong = bool(cap_cfg.get("defer_strong_reads", True))
+        if cap_cfg.get("enabled") and defer_strong:
+            self.job_queue = JobQueue(Path(cfg.db_path).parent / "jobs.sqlite")
+
+            def _ctx_factory(_cfg=cfg):
+                # Built INSIDE the worker thread — its own LLM + Memory conn.
+                from brain.llm import LLM
+                from brain.memory import Memory
+                from brain.embeddings import make_backend
+                wllm = LLM(_cfg)
+                mem = Memory(_cfg.db_path, backend=make_backend(_cfg, llm=wllm))
+                try:
+                    mem.conn.execute("PRAGMA journal_mode=WAL")
+                except Exception:
+                    pass
+                return {"cfg": _cfg, "llm": wllm, "memory": mem}
+
+            self.worker = Worker(
+                self.job_queue, DEFAULT_HANDLERS, ctx_factory=_ctx_factory,
+                owner="deep_read", gate=self._worker_should_drain,
+                poll_seconds=1.0, idle_seconds=4.0,
+                log=lambda m: self.log(m))
+
         self.observer = None
         if cap_cfg.get("enabled") and getattr(brain, "embodiment", None) is not None:
             self.observer = ScreenObserver(
@@ -209,6 +242,9 @@ class BrainDaemon:
                     cap_cfg.get("content_change_threshold", 0.05)),
                 content_focus_window=bool(
                     cap_cfg.get("content_focus_window", True)),
+                job_queue=self.job_queue,
+                defer_strong=defer_strong,
+                deep_read_ttl_seconds=float(cap_cfg.get("deep_read_ttl_seconds", 600)),
                 visual_embedder=getattr(brain, "visual_embedder", None),
             )
             if not self.observer.ok:
@@ -270,8 +306,41 @@ class BrainDaemon:
             return
         self.adapters.append(adapter)
 
+    def _worker_should_drain(self) -> bool:
+        """Gate the strong-read worker: drain freely when asleep or the user is
+        away (latency is free then); while awake, only drain when a backlog
+        builds, so deep reads don't contend with interactive work on the GPU."""
+        if self.job_queue is None:
+            return False
+        if self.state in (DROWSY, NREM, REM) or self._user_present is False:
+            return True
+        try:
+            return (self.job_queue.depth("deep_read") >= 8
+                    or (self.job_queue.oldest_age() or 0.0) >= 180.0)
+        except Exception:
+            return False
+
+    def _sweep_spool(self) -> int:
+        """Delete orphaned spool screenshots (a deep_read job dropped/failed
+        without consuming its file). Bounded deferred-pixel hygiene."""
+        d = Path(self.cfg.sandbox_dir) / "spool"
+        if not d.exists():
+            return 0
+        cutoff = time.time() - 3600.0
+        n = 0
+        for f in d.glob("*.png"):
+            try:
+                if f.stat().st_mtime < cutoff:
+                    f.unlink()
+                    n += 1
+            except OSError:
+                pass
+        return n
+
     def run_forever(self, max_ticks: Optional[int] = None) -> DaemonStats:
         """Main loop. `max_ticks` is for tests / bounded runs."""
+        if self.worker is not None:
+            self.worker.start()
         try:
             while True:
                 if max_ticks is not None and self.tick_n >= max_ticks:
@@ -284,9 +353,16 @@ class BrainDaemon:
             self.log("\n[daemon] interrupted; saving and exiting")
             return self.stats
         finally:
+            if self.worker is not None:
+                self.worker.stop()
             for ad in self.adapters:
                 try:
                     ad.close()
+                except Exception:
+                    pass
+            if self.job_queue is not None:
+                try:
+                    self.job_queue.close()
                 except Exception:
                     pass
 
@@ -308,11 +384,13 @@ class BrainDaemon:
             try:
                 res = self.observer.maybe_capture(idle=idle)
                 if res and res.get("captured"):
+                    tail = ("→ queued for deep read" if res.get("queued")
+                            else f"→ {res.get('content')}")
                     self.log(
                         f"  👁 capture [{res.get('trigger')}] "
                         f"{res.get('model_tier')} model "
                         f"({res.get('model') or 'none'}) "
-                        f"dist={res.get('content_dist')} → {res.get('content')}")
+                        f"dist={res.get('content_dist')} {tail}")
             except Exception as e:
                 self.log(f"[daemon] observer error: {e}")
 
@@ -436,6 +514,12 @@ class BrainDaemon:
                 },
                 "stats": self.stats.__dict__,
                 "capture": self.observer.stats() if self.observer else None,
+                "queue": ({"depth": self.job_queue.depth(),
+                           "oldest_age": round(self.job_queue.oldest_age() or 0.0, 1),
+                           "processed": getattr(self.worker, "processed", 0),
+                           "failed": getattr(self.worker, "failed", 0),
+                           **self.job_queue.stats()}
+                          if self.job_queue is not None else None),
                 "user_present": self._user_present,
             }
             write_status(self.cfg, payload)
@@ -480,6 +564,17 @@ class BrainDaemon:
         ticks_done = self.nrem_bout_ticks - self._sleep_bouts_remaining
         if ticks_done == 0:
             self.log(f"\n[nrem] bout starts (cycle {self._sleep_cycle_index + 1})")
+            # job queue: drop TTL-expired deep reads, delete old finished rows,
+            # and sweep orphaned spool files (deferred-pixel hygiene).
+            if self.job_queue is not None:
+                try:
+                    pr = self.job_queue.purge()
+                    self._sweep_spool()
+                    if pr.get("dropped") or pr.get("deleted"):
+                        self.log(f"  🧹 queue purge: dropped {pr['dropped']} "
+                                 f"stale, deleted {pr['deleted']} finished")
+                except Exception as e:
+                    self.log(f"  ⚠ queue purge failed: {e}")
             # mood regulator: fatigue recovery, mood drift
             self.mood_regulator.run(self.affect)
             # forgetter: prune low-salience old episodes

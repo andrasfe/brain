@@ -30,6 +30,7 @@ import re
 import shutil
 import subprocess
 import time
+from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
 
@@ -201,6 +202,42 @@ def crop_box(win, img_px, disp_pts, min_side: int = 40):
     return (left, top, right, bottom)
 
 
+def build_read_instruction(rules: str, app: str, deep: bool) -> str:
+    """The VLM prompt for a screen read. `deep` (strong model) captures the
+    actual CONTENT; the shallow form is a quick one-liner. Shared by the inline
+    fast path and the deferred deep_read worker so they stay in lock-step."""
+    app_known = app or "an unknown app"
+    if deep:
+        return (
+            f"The macOS frontmost app is '{app_known}' (GROUND TRUTH; do not "
+            "rename it).\n"
+            f"Where to look on screen:\n{rules}\n\n"
+            "Describe WHAT THE USER IS READING OR DOING — the actual CONTENT, "
+            "not just the app. Name the topic/subject, the key headlines, post "
+            "titles, usernames or threads visible, and the gist. 1-2 sentences. "
+            "For a feed (X, Reddit, news) name the specific topics and the most "
+            "notable posts. Never transcribe passwords, secrets, tokens, or "
+            "full private messages.")
+    return (
+        f"The macOS frontmost app is '{app_known}' (GROUND TRUTH).\n"
+        f"Where to look on screen:\n{rules}\n\n"
+        "Reply with ONE short sentence: what is on screen / what is the user "
+        "doing? No preamble, no list.")
+
+
+def store_screen_observation(memory, app: str, description: str,
+                             embedding=None, salience: float = 0.55) -> str:
+    """Persist one screen observation: [app]-prefixed content + topic tags +
+    optional DINOv2 embedding. Used by both the inline path and the worker."""
+    content = (description or f"(screen: {app or 'unknown'})")
+    content = f"[{app or 'unknown'}] {content}"[:500]
+    tags = [f"app:{(app or 'unknown').lower()}"] + topic_tags(description)
+    memory.store(task="screen_observation", kind="activity", content=content,
+                 salience=salience, mem_type=OBSERVATION, tags=tags,
+                 embedding=embedding)
+    return content
+
+
 def content_changed(vec, last_vec, app_switched: bool, threshold: float) -> bool:
     """Did the SCREEN CONTENT meaningfully change since the last described
     frame? Uses DINOv2 cosine distance — so scrolling to a new post / opening a
@@ -229,6 +266,9 @@ class ScreenObserver:
                  deep_read_on_change: bool = True,
                  content_change_threshold: float = 0.05,
                  content_focus_window: bool = True,
+                 job_queue=None,
+                 defer_strong: bool = True,
+                 deep_read_ttl_seconds: float = 600.0,
                  visual_embedder=None,
                  time_fn=time.monotonic):
         self.visual_embedder = visual_embedder
@@ -243,7 +283,15 @@ class ScreenObserver:
         # Content grabbing crops to the FRONTMOST WINDOW (not the full screen):
         # sharper change signal, cleaner reads, background windows excluded.
         self.content_focus_window = content_focus_window
+        # Async deferral: when a JobQueue is attached, slow STRONG reads are
+        # enqueued (with a spooled crop) instead of run inline — so the 27b
+        # never blocks the daemon tick. Fast reads stay inline (they're quick).
+        self.job_queue = job_queue
+        self.defer_strong = defer_strong
+        self.deep_read_ttl_seconds = float(deep_read_ttl_seconds)
+        self._spool_dir = Path(cfg.sandbox_dir) / "spool"
         self._last_described_vec = None   # DINOv2 vec of the last frame we read
+        self.queued = 0
         self.cfg = cfg
         self.cfg = cfg
         self.llm = llm
@@ -364,6 +412,19 @@ class ScreenObserver:
             Image.open(path).crop(box).save(out)
             return out
         except Exception:
+            return None
+
+    def _spool(self, path):
+        """Move a screenshot into the durable spool dir for a deferred read.
+        Returns the new path, or None on failure (caller falls back to inline)."""
+        if not path or not os.path.exists(path):
+            return None
+        try:
+            self._spool_dir.mkdir(parents=True, exist_ok=True)
+            dest = str(self._spool_dir / (os.path.basename(path) + ".spool.png"))
+            os.replace(path, dest)
+            return dest
+        except OSError:
             return None
 
     def pause(self) -> None:
@@ -495,39 +556,56 @@ class ScreenObserver:
         use_strong = (changed and self.deep_read_on_change
                       and bool(self.vision_model_strong))
 
+        trigger = ("app_switch" if app_switched
+                   else ("content_change" if changed else "timer"))
+
+        # ── DEFERRED deep read: enqueue the slow strong read off the tick ──
+        # Spool the focused-window crop, enqueue a deep_read job, drop the full
+        # frame, and return immediately. A worker comprehends it later (during
+        # sleep). We advance the content-change baseline NOW (we've committed to
+        # reading this frame) so we don't re-enqueue every tick.
+        if (use_strong and self.job_queue is not None and self.defer_strong
+                and read_path):
+            spool = self._spool(read_path)
+            other = focus_path if read_path == path else path  # the un-spooled one
+            if other:
+                try:
+                    os.remove(other)
+                except OSError:
+                    pass
+            if spool:
+                try:
+                    self.job_queue.enqueue(
+                        "deep_read",
+                        {"spool": spool, "app": app, "vec": vis_vec},
+                        priority=10 if app_switched else 5,
+                        dedup_key=f"win:{(app or 'unknown').lower()}",
+                        not_after_ts=now + self.deep_read_ttl_seconds)
+                except Exception:
+                    pass
+                if vis_vec is not None:
+                    self._last_described_vec = vis_vec
+                self.captured += 1
+                self.queued += 1
+                return {"captured": True, "queued": True, "app": app,
+                        "trigger": trigger, "model": self.vision_model_strong,
+                        "model_tier": "strong(queued)", "content_dist": content_dist,
+                        "spool": spool}
+            # spool failed → fall through to an inline read on read_path
+
+        # ── INLINE read (fast frames, or strong when no queue) ──
         description = ""
         model = ""
         try:
-            if path and self.vision_model:
+            if read_path and self.vision_model:
                 from .knowledge import render_rules
-                rules = render_rules(self.cfg.db_path)
-                app_known = app or "an unknown app"
                 model = self.vision_model_strong if use_strong else self.vision_model
-                if use_strong:
-                    # Deep, content-focused read: WHAT is being read/done, not
-                    # just which app. The substance — topics, titles, threads.
-                    instruction = (
-                        f"The macOS frontmost app is '{app_known}' (GROUND TRUTH; "
-                        "do not rename it).\n"
-                        f"Where to look on screen:\n{rules}\n\n"
-                        "Describe WHAT THE USER IS READING OR DOING — the actual "
-                        "CONTENT, not just the app. Name the topic/subject, the "
-                        "key headlines, post titles, usernames or threads visible, "
-                        "and the gist. 1-2 sentences. For a feed (X, Reddit, news) "
-                        "name the specific topics and the most notable posts. "
-                        "Never transcribe passwords, secrets, tokens, or full "
-                        "private messages.")
-                else:
-                    instruction = (
-                        f"The macOS frontmost app is '{app_known}' (GROUND TRUTH).\n"
-                        f"Where to look on screen:\n{rules}\n\n"
-                        "Reply with ONE short sentence: what is on screen / what "
-                        "is the user doing? No preamble, no list.")
+                instruction = build_read_instruction(
+                    render_rules(self.cfg.db_path), app, deep=use_strong)
                 raw = self.llm.describe_image(model, instruction, read_path)
                 description = clean_vision_text(raw)
         finally:
-            # PIXEL-DROP: delete the full screenshot AND the focused-window crop,
-            # no matter what happened above.
+            # PIXEL-DROP: delete the full screenshot AND the focused-window crop.
             for _p in (path, focus_path):
                 if _p:
                     try:
@@ -535,33 +613,21 @@ class ScreenObserver:
                     except OSError:
                         pass
 
-        # Remember the embedding of the frame we actually read, so the NEXT
-        # content-change comparison is against the last *described* screen.
         if description and vis_vec is not None:
             self._last_described_vec = vis_vec
 
         rendered = obs.render_text(limit=12)
-        content = description or rendered or f"(screen: {app or 'unknown'})"
-        content = f"[{app or 'unknown'}] {content}"[:500]
-
-        tags = [f"app:{(app or 'unknown').lower()}"] + topic_tags(description)
-        self.memory.store(
-            task="screen_observation", kind="activity",
-            content=content, salience=0.4 + (0.15 if use_strong else 0.0),
-            mem_type=OBSERVATION,
-            tags=tags,
-            embedding=img_blob,   # DINOv2 image vector when enabled, else None
-        )
+        content = store_screen_observation(
+            self.memory, app, description or rendered, embedding=img_blob,
+            salience=0.4 + (0.15 if use_strong else 0.0))
         self.captured += 1
         return {"captured": True, "app": app, "content": content[:120],
-                "trigger": "app_switch" if app_switched else
-                           ("content_change" if changed else "timer"),
-                "model": model,
+                "trigger": trigger, "model": model,
                 "model_tier": "strong" if use_strong else "fast",
-                "content_dist": content_dist,
-                "tags": tags}
+                "content_dist": content_dist}
 
     def stats(self) -> dict[str, Any]:
         return {"captured": self.captured, "skipped": self.skipped,
-                "deduped": self.deduped, "paused": self._paused,
+                "deduped": self.deduped, "queued": self.queued,
+                "paused": self._paused,
                 "privacy_ok": self.ok, "reason": self.reason}

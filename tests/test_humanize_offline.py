@@ -1897,6 +1897,123 @@ class JobQueueTests(unittest.TestCase):
         q.close()
 
 
+class WorkerQueueTests(unittest.TestCase):
+    """Q1 — worker drains jobs; deep_read handler; observer enqueues vs inline."""
+
+    def test_worker_processes_and_completes(self):
+        import threading
+        from brain.jobqueue import JobQueue
+        from brain.workers import Worker
+        q = JobQueue(Path(tempfile.mkdtemp()) / "j.sqlite")
+        done = threading.Event(); seen = []
+
+        def handler(payload, ctx):
+            seen.append(payload); done.set()
+
+        w = Worker(q, {"t": handler}, ctx_factory=lambda: {},
+                   idle_seconds=0.05, poll_seconds=0.01)
+        q.enqueue("t", {"x": 1})
+        w.start()
+        self.assertTrue(done.wait(5.0))
+        w.stop(); w.join(2.0)
+        self.assertEqual(seen, [{"x": 1}])
+        self.assertEqual(q.stats().get("done"), 1)
+        q.close()
+
+    def test_worker_failure_dead_letters(self):
+        import threading
+        from brain.jobqueue import JobQueue
+        from brain.workers import Worker
+        q = JobQueue(Path(tempfile.mkdtemp()) / "j.sqlite")
+        calls = {"n": 0}; ev = threading.Event()
+
+        def boom(payload, ctx):
+            calls["n"] += 1
+            if calls["n"] >= 2:
+                ev.set()
+            raise RuntimeError("nope")
+
+        w = Worker(q, {"t": boom}, ctx_factory=lambda: {},
+                   idle_seconds=0.02, poll_seconds=0.01)
+        q.enqueue("t", {}, max_attempts=2)
+        w.start()
+        self.assertTrue(ev.wait(5.0))
+        # let it dead-letter
+        for _ in range(50):
+            if q.stats().get("failed"):
+                break
+            time.sleep(0.05)
+        w.stop(); w.join(2.0)
+        self.assertEqual(q.stats().get("failed"), 1)
+        q.close()
+
+    def test_run_deep_read_stores_and_drops_spool(self):
+        from brain.workers import run_deep_read
+        from brain.memory import Memory, OBSERVATION
+        from brain.embeddings import TfidfBackend
+        from brain.config import Config
+        tmp = Path(tempfile.mkdtemp())
+        spool = tmp / "shot.spool.png"; spool.write_bytes(b"png")
+        cfg = Config(raw={}, api_key="", base_url="http://localhost:1234/v1",
+                     require_auth=False, extra_headers={},
+                     models={"reflex": "fast", "executive": "smart"},
+                     timeout_seconds=10, max_retries=0, sandbox_dir=tmp,
+                     db_path=tmp / "m.sqlite", loop={}, memory={}, effectors={},
+                     regions={}, capture={"vision_model_strong": ""})
+        mem = Memory(cfg.db_path, backend=TfidfBackend())
+        llm = MagicMock(); llm.describe_image.return_value = "Reading a Reddit thread about X"
+        run_deep_read({"spool": str(spool), "app": "Google Chrome", "vec": None},
+                      {"cfg": cfg, "llm": llm, "memory": mem})
+        rows = mem.conn.execute(
+            "SELECT content FROM episodes WHERE mem_type=?", (OBSERVATION,)).fetchall()
+        self.assertTrue(any("Reddit" in r["content"] for r in rows))
+        self.assertFalse(spool.exists())                       # deferred pixel-drop
+        self.assertEqual(llm.describe_image.call_args[0][0], "smart")  # executive
+        mem.close()
+
+    def test_run_deep_read_missing_spool_is_noop(self):
+        from brain.workers import run_deep_read
+        llm = MagicMock()
+        run_deep_read({"spool": "/no/such.png", "app": "X"},
+                      {"cfg": MagicMock(), "llm": llm, "memory": MagicMock()})
+        llm.describe_image.assert_not_called()
+
+    def test_observer_enqueues_strong_read_instead_of_inline(self):
+        from brain.observer import ScreenObserver
+        from brain.jobqueue import JobQueue
+        from brain.memory import Memory
+        from brain.embeddings import TfidfBackend
+        from brain.config import Config
+        from afferent import Embodiment, FakeBackend
+        from afferent.types import Observation, Frame
+        tmp = Path(tempfile.mkdtemp())
+        p = tmp / "frame.png"; p.write_bytes(b"png")
+        cfg = Config(raw={"sandbox_dir": str(tmp)}, api_key="",
+                     base_url="http://localhost:1234/v1", require_auth=False,
+                     extra_headers={}, models={"reflex": "fast", "executive": "smart"},
+                     timeout_seconds=10, max_retries=0, sandbox_dir=tmp,
+                     db_path=tmp / "m.sqlite", loop={},
+                     memory={"embedding_backend": "openrouter"}, effectors={}, regions={})
+        emb = Embodiment(FakeBackend(script=[Observation(
+            ts=0.0, frontmost_app="Google Chrome",
+            frame=Frame(id="f", ts=0.0, path=str(p)))]), read_only=True)
+        mem = Memory(cfg.db_path, backend=TfidfBackend())
+        q = JobQueue(tmp / "j.sqlite")
+        llm = MagicMock()
+        vemb = MagicMock(); vemb.available = True; vemb.embed.return_value = [0.1, 0.2, 0.3]
+        ob = ScreenObserver(cfg, llm, mem, emb, interval_seconds=0,
+                            vision_model="fast", vision_model_strong="smart",
+                            content_focus_window=False, job_queue=q,
+                            defer_strong=True, visual_embedder=vemb)
+        ob._fingerprint = lambda _p: None
+        res = ob.maybe_capture(force=True)            # first frame → strong → deferred
+        self.assertTrue(res.get("queued"))
+        self.assertEqual(q.depth("deep_read"), 1)
+        llm.describe_image.assert_not_called()        # NOT run inline
+        self.assertFalse(p.exists())                  # frame spooled (moved), not left
+        mem.close(); q.close()
+
+
 class ImaginationTests(unittest.TestCase):
     """Phase 0 — shared planning/replay substrate (pure-Python, no numpy)."""
 

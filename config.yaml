@@ -164,6 +164,13 @@ capture:
   # sharper change signal (no static chrome), cleaner reads, background windows
   # excluded. Falls back to the full frame when window bounds are unavailable.
   content_focus_window: true
+  # Async deferral: enqueue the slow STRONG reads (27b) instead of running them
+  # inline, so they never block the daemon tick. A worker drains them — freely
+  # while you're away/asleep, only on backlog while you're active. The cropped
+  # screenshot is spooled locally until processed, then deleted (+TTL purge);
+  # fast reads stay inline. Set false to read inline as before.
+  defer_strong_reads: true
+  deep_read_ttl_seconds: 600   # drop a queued deep read older than this (stale screen)
   # Screen-state representation for the sequence model:
   #   "none"   — embed the text description (EmbeddingGemma) [default]
   #   "dinov2" — embed the screenshot with local DINOv2 (needs torch; no uploads)
