@@ -2678,6 +2678,57 @@ class ContentAwareReadingTests(unittest.TestCase):
         mem.close()
 
 
+class FocusWindowCropTests(unittest.TestCase):
+    """Crop content grabbing to the focused window (Retina-aware geometry)."""
+
+    def test_crop_box_retina_scaling(self):
+        from brain.observer import crop_box
+        # 2x Retina: 3024x1964 px over 1512x982 pt; window (100,80) 800x600 pt
+        self.assertEqual(crop_box((100, 80, 800, 600), (3024, 1964), (1512, 982)),
+                         (200, 160, 1800, 1360))
+
+    def test_crop_box_1x(self):
+        from brain.observer import crop_box
+        self.assertEqual(crop_box((0, 25, 1280, 700), (1280, 800), (1280, 800)),
+                         (0, 25, 1280, 725))
+
+    def test_crop_box_rejects_offscreen_tiny_bad(self):
+        from brain.observer import crop_box
+        self.assertIsNone(crop_box((5000, 80, 800, 600), (3024, 1964), (1512, 982)))
+        self.assertIsNone(crop_box((0, 0, 10, 10), (3024, 1964), (1512, 982)))
+        self.assertIsNone(crop_box((0, 0, 100, 100), (3024, 1964), (0, 0)))
+        self.assertIsNone(crop_box(("x", 0, 0, 0), (1, 1), (1, 1)))
+
+    def test_focus_crop_disabled_returns_none(self):
+        from brain.observer import ScreenObserver
+        from brain.config import Config
+        tmp = Path(tempfile.mkdtemp())
+        cfg = Config(raw={}, api_key="", base_url="http://localhost:1234/v1",
+                     require_auth=False, extra_headers={},
+                     models={"reflex": "x", "executive": "y"}, timeout_seconds=10,
+                     max_retries=0, sandbox_dir=tmp, db_path=tmp / "m.sqlite",
+                     loop={}, memory={"embedding_backend": "tfidf"}, effectors={},
+                     regions={})
+        ob = ScreenObserver(cfg, MagicMock(), MagicMock(), MagicMock(),
+                            content_focus_window=False)
+        self.assertIsNone(ob._focus_crop("/tmp/x.png"))
+
+    def test_focus_crop_falls_back_when_no_bounds(self):
+        from brain.observer import ScreenObserver
+        from brain.config import Config
+        tmp = Path(tempfile.mkdtemp())
+        cfg = Config(raw={}, api_key="", base_url="http://localhost:1234/v1",
+                     require_auth=False, extra_headers={},
+                     models={"reflex": "x", "executive": "y"}, timeout_seconds=10,
+                     max_retries=0, sandbox_dir=tmp, db_path=tmp / "m.sqlite",
+                     loop={}, memory={"embedding_backend": "tfidf"}, effectors={},
+                     regions={})
+        ob = ScreenObserver(cfg, MagicMock(), MagicMock(), MagicMock(),
+                            content_focus_window=True)
+        ob._focused_window_bounds = lambda: None      # no window bounds
+        self.assertIsNone(ob._focus_crop("/tmp/x.png"))
+
+
 class ScreenObserverTests(unittest.TestCase):
     """Capture loop + privacy spine — local-only, exclusion, pixel-drop."""
 

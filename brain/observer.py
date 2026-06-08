@@ -178,6 +178,29 @@ def topic_tags(description: str, limit: int = 6) -> list[str]:
     return out[:limit]
 
 
+def crop_box(win, img_px, disp_pts, min_side: int = 40):
+    """Map a focused-window rect (in screen POINTS) to a pixel crop box on the
+    screenshot, accounting for Retina scaling (points → pixels). Pure +
+    testable. Returns (left, top, right, bottom) clamped to the image, or None
+    when the result is degenerate / the window is off the main display."""
+    try:
+        x, y, w, h = (float(v) for v in win)
+        iw, ih = (float(v) for v in img_px)
+        dw, dh = (float(v) for v in disp_pts)
+    except (TypeError, ValueError):
+        return None
+    if dw <= 0 or dh <= 0 or iw <= 0 or ih <= 0:
+        return None
+    sx, sy = iw / dw, ih / dh           # pixels per point (≈2.0 on Retina)
+    left = max(0, min(int(x * sx), int(iw)))
+    top = max(0, min(int(y * sy), int(ih)))
+    right = max(0, min(int((x + w) * sx), int(iw)))
+    bottom = max(0, min(int((y + h) * sy), int(ih)))
+    if right - left < min_side or bottom - top < min_side:
+        return None                     # off-screen / tiny → caller uses full frame
+    return (left, top, right, bottom)
+
+
 def content_changed(vec, last_vec, app_switched: bool, threshold: float) -> bool:
     """Did the SCREEN CONTENT meaningfully change since the last described
     frame? Uses DINOv2 cosine distance — so scrolling to a new post / opening a
@@ -205,6 +228,7 @@ class ScreenObserver:
                  change_detect: bool = True,
                  deep_read_on_change: bool = True,
                  content_change_threshold: float = 0.05,
+                 content_focus_window: bool = True,
                  visual_embedder=None,
                  time_fn=time.monotonic):
         self.visual_embedder = visual_embedder
@@ -216,6 +240,9 @@ class ScreenObserver:
         self.vision_model_strong = vision_model_strong or cfg.models.get("executive", "")
         self.deep_read_on_change = deep_read_on_change
         self.content_change_threshold = float(content_change_threshold)
+        # Content grabbing crops to the FRONTMOST WINDOW (not the full screen):
+        # sharper change signal, cleaner reads, background windows excluded.
+        self.content_focus_window = content_focus_window
         self._last_described_vec = None   # DINOv2 vec of the last frame we read
         self.cfg = cfg
         self.cfg = cfg
@@ -274,6 +301,70 @@ class ScreenObserver:
                 os.remove(thumb)
             except OSError:
                 pass
+
+    def _focused_window_bounds(self):
+        """(x, y, w, h) of the frontmost window in screen POINTS, or None.
+        Via System Events (needs Accessibility, already granted for hands)."""
+        script = ('tell application "System Events" to tell '
+                  '(first application process whose frontmost is true) to '
+                  'get {position, size} of front window')
+        try:
+            r = subprocess.run(["osascript", "-e", script],
+                               capture_output=True, text=True, timeout=4)
+            nums = [int(float(n)) for n in re.findall(r"-?\d+\.?\d*", r.stdout)]
+            return tuple(nums[:4]) if len(nums) >= 4 else None
+        except Exception:
+            return None
+
+    def _display_points(self):
+        """Main display size in POINTS (logical), for the point→pixel scale."""
+        try:
+            r = subprocess.run(
+                ["osascript", "-e",
+                 'tell application "Finder" to get bounds of window of desktop'],
+                capture_output=True, text=True, timeout=4)
+            nums = [int(float(n)) for n in re.findall(r"-?\d+\.?\d*", r.stdout)]
+            # bounds = {x1, y1, x2, y2} → width/height
+            if len(nums) >= 4:
+                return (nums[2] - nums[0], nums[3] - nums[1])
+        except Exception:
+            pass
+        return None
+
+    def _image_pixels(self, path):
+        """(width, height) of the screenshot in PIXELS, via sips."""
+        if not self._sips or not path:
+            return None
+        try:
+            r = subprocess.run(
+                [self._sips, "-g", "pixelWidth", "-g", "pixelHeight", path],
+                capture_output=True, text=True, timeout=5)
+            w = re.search(r"pixelWidth:\s*(\d+)", r.stdout)
+            h = re.search(r"pixelHeight:\s*(\d+)", r.stdout)
+            return (int(w.group(1)), int(h.group(1))) if w and h else None
+        except Exception:
+            return None
+
+    def _focus_crop(self, path):
+        """Crop the screenshot to the frontmost window and return the new path,
+        or None to fall back to the full frame. The caller drops both files."""
+        if not self.content_focus_window or not path:
+            return None
+        win = self._focused_window_bounds()
+        img = self._image_pixels(path)
+        disp = self._display_points()
+        if not (win and img and disp):
+            return None
+        box = crop_box(win, img, disp)
+        if not box:
+            return None
+        try:
+            from PIL import Image
+            out = path + ".focus.png"
+            Image.open(path).crop(box).save(out)
+            return out
+        except Exception:
+            return None
 
     def pause(self) -> None:
         self._paused = True
@@ -362,15 +453,23 @@ class ScreenObserver:
             self.deduped += 1
             return {"captured": False, "reason": "unchanged"}
 
-        # DINOv2 image embedding (the screen-state vector) BEFORE pixel-drop,
-        # when a visual embedder is configured + available. Kept raw (vis_vec)
-        # for the content-change comparison, and packed (img_blob) for storage.
+        # Content grabbing uses a crop of the FRONTMOST WINDOW (full-screen
+        # capture stays for the world model / privacy spine). The crop sharpens
+        # the content-change signal (no static chrome) and excludes background
+        # windows from what gets embedded/described. Falls back to the full
+        # frame when window bounds aren't available.
+        focus_path = self._focus_crop(path)
+        read_path = focus_path or path
+
+        # DINOv2 image embedding (the screen-state vector) of the focused window
+        # BEFORE pixel-drop. Kept raw (vis_vec) for the content-change
+        # comparison, and packed (img_blob) for storage.
         img_blob = None
         vis_vec = None
-        if self.visual_embedder is not None and path:
+        if self.visual_embedder is not None and read_path:
             try:
                 if getattr(self.visual_embedder, "available", False):
-                    vis_vec = self.visual_embedder.embed(path)
+                    vis_vec = self.visual_embedder.embed(read_path)
                     if vis_vec:
                         from .embeddings import _pack_floats
                         img_blob = _pack_floats(vis_vec)
@@ -424,15 +523,17 @@ class ScreenObserver:
                         f"Where to look on screen:\n{rules}\n\n"
                         "Reply with ONE short sentence: what is on screen / what "
                         "is the user doing? No preamble, no list.")
-                raw = self.llm.describe_image(model, instruction, path)
+                raw = self.llm.describe_image(model, instruction, read_path)
                 description = clean_vision_text(raw)
         finally:
-            # PIXEL-DROP: delete the screenshot no matter what happened above.
-            if path:
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
+            # PIXEL-DROP: delete the full screenshot AND the focused-window crop,
+            # no matter what happened above.
+            for _p in (path, focus_path):
+                if _p:
+                    try:
+                        os.remove(_p)
+                    except OSError:
+                        pass
 
         # Remember the embedding of the frame we actually read, so the NEXT
         # content-change comparison is against the last *described* screen.

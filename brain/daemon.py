@@ -206,7 +206,9 @@ class BrainDaemon:
                 change_detect=bool(cap_cfg.get("change_detect", True)),
                 deep_read_on_change=bool(cap_cfg.get("deep_read_on_change", True)),
                 content_change_threshold=float(
-                    cap_cfg.get("content_change_threshold", 0.12)),
+                    cap_cfg.get("content_change_threshold", 0.05)),
+                content_focus_window=bool(
+                    cap_cfg.get("content_focus_window", True)),
                 visual_embedder=getattr(brain, "visual_embedder", None),
             )
             if not self.observer.ok:

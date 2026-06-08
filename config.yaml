@@ -160,6 +160,10 @@ capture:
   # (visual_embed: dinov2); else falls back to app-switch only.
   deep_read_on_change: true
   content_change_threshold: 0.05   # DINOv2 cosine distance that counts as "new content"
+  # Content grabbing crops to the FRONTMOST WINDOW (full-screen capture stays):
+  # sharper change signal (no static chrome), cleaner reads, background windows
+  # excluded. Falls back to the full frame when window bounds are unavailable.
+  content_focus_window: true
   # Screen-state representation for the sequence model:
   #   "none"   — embed the text description (EmbeddingGemma) [default]
   #   "dinov2" — embed the screenshot with local DINOv2 (needs torch; no uploads)
