@@ -101,9 +101,11 @@ class Effectors:
             "ex": '{"text": "hello", "append_enter": true}'},
         "screen_key": {
             "args": "{combo: str}",
-            "use": "press a single key or chord on the keyboard",
-            "ex": '{"combo": "cmd+c"} or {"combo": "return"} or {"combo": "esc"}',
-            "avoid": "for scrolling a view, prefer screen_scroll over paging keys"},
+            "use": "press a single key or chord. TO SCROLL when screen_scroll "
+                   "is not available, use this with 'pagedown'/'pageup'/'down'/"
+                   "'up'/'space'",
+            "ex": '{"combo": "pagedown"}  (scroll down) | {"combo": "cmd+c"} | '
+                  '{"combo": "return"}'},
         "screen_scroll": {
             "args": "{amount: int (negative = down, positive = up), x_pct?, y_pct?}",
             "use": "scroll the current view; use this for ANY scrolling",

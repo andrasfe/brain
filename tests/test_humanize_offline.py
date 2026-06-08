@@ -2510,6 +2510,32 @@ class MotorRepairTests(unittest.TestCase):
         self.assertEqual(eff, "shell")
         self.assertEqual(note, "")
 
+    # ── backend WITHOUT scroll capability (real macOS: click/type/key only) ──
+    NOSCROLL = ["shell", "screen_click", "screen_type", "screen_key", "look",
+                "think", "finish"]
+
+    def test_scroll_falls_back_to_pagedown_key(self):
+        from brain.motor import repair_motor_action
+        eff, args, _ = repair_motor_action("screen_key", {"scroll": "down"}, self.NOSCROLL)
+        self.assertEqual(eff, "screen_key")
+        self.assertEqual(args["combo"], "pagedown")
+        eff, args, _ = repair_motor_action("shell", {"command": "page up"}, self.NOSCROLL)
+        self.assertEqual((eff, args["combo"]), ("screen_key", "pageup"))
+
+    def test_unavailable_screen_scroll_becomes_key(self):
+        from brain.motor import repair_motor_action
+        eff, args, note = repair_motor_action(
+            "screen_scroll", {"amount": -3}, self.NOSCROLL)
+        self.assertEqual(eff, "screen_key")
+        self.assertEqual(args["combo"], "pagedown")
+        self.assertTrue(note)
+
+    def test_valid_pagedown_key_untouched(self):
+        from brain.motor import repair_motor_action
+        eff, args, note = repair_motor_action(
+            "screen_key", {"combo": "pagedown"}, self.NOSCROLL)
+        self.assertEqual((eff, note), ("screen_key", ""))
+
 
 class MotorCortexTests(unittest.TestCase):
     """Narration→action grounding via the executive motor cortex."""

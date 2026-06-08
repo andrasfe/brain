@@ -118,7 +118,7 @@ scenario: "boring_afternoon"
 # a `look` effector + an occipital region (eyes) and, if the backend supports
 # it, `screen_click` / `screen_type` / `screen_key` (hands).
 #   backend:  "fake" (scripted, safe) | "macos" (screencapture + cliclick)
-#   read_only: true = eyes only; hands refuse until set false (SAFE DEFAULT)
+#   read_only=true => eyes only; hands refuse until it is false (SAFE DEFAULT)
 embodiment:
   enabled: false
   backend: "macos"
