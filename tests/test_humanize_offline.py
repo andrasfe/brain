@@ -2446,6 +2446,105 @@ class VisualReplayTests(unittest.TestCase):
         wm.close(); skills.close()
 
 
+class MotorRepairTests(unittest.TestCase):
+    """Deterministic repair of mis-selected embodied actions."""
+
+    AV = ["shell", "screen_click", "screen_type", "screen_key", "screen_scroll",
+          "look", "think", "finish"]
+
+    def test_shell_pagedown_becomes_scroll(self):
+        from brain.motor import repair_motor_action
+        eff, args, note = repair_motor_action(
+            "shell", {"command": "osascript -e 'key code 121'  # page down"}, self.AV)
+        self.assertEqual(eff, "screen_scroll")
+        self.assertEqual(args["amount"], -3)
+        self.assertTrue(note)
+
+    def test_shell_keystroke_becomes_type(self):
+        from brain.motor import repair_motor_action
+        eff, args, _ = repair_motor_action(
+            "shell", {"command": 'osascript -e \'keystroke "hello"\''}, self.AV)
+        self.assertEqual(eff, "screen_type")
+        self.assertEqual(args["text"], "hello")
+
+    def test_screen_key_scroll_arg_becomes_scroll(self):
+        from brain.motor import repair_motor_action
+        eff, args, _ = repair_motor_action("screen_key", {"scroll": "down"}, self.AV)
+        self.assertEqual(eff, "screen_scroll")
+        self.assertEqual(args["amount"], -3)
+
+    def test_screen_key_pageup_combo_becomes_scroll(self):
+        from brain.motor import repair_motor_action
+        eff, args, _ = repair_motor_action("screen_key", {"combo": "pageup"}, self.AV)
+        self.assertEqual(eff, "screen_scroll")
+        self.assertEqual(args["amount"], 3)
+
+    def test_scroll_direction_normalized(self):
+        from brain.motor import repair_motor_action
+        eff, args, _ = repair_motor_action("screen_scroll", {"direction": "up"}, self.AV)
+        self.assertEqual(eff, "screen_scroll")
+        self.assertEqual(args["amount"], 3)
+
+    def test_type_content_alias(self):
+        from brain.motor import repair_motor_action
+        eff, args, _ = repair_motor_action("screen_type", {"content": "hi"}, self.AV)
+        self.assertEqual(args, {"text": "hi"})
+
+    def test_click_xy_alias(self):
+        from brain.motor import repair_motor_action
+        eff, args, _ = repair_motor_action("screen_click", {"x": 0.5, "y": 0.2}, self.AV)
+        self.assertEqual(args["x_pct"], 0.5)
+        self.assertEqual(args["y_pct"], 0.2)
+
+    def test_valid_action_untouched(self):
+        from brain.motor import repair_motor_action
+        eff, args, note = repair_motor_action(
+            "screen_click", {"x_pct": 0.5, "y_pct": 0.5}, self.AV)
+        self.assertEqual(eff, "screen_click")
+        self.assertEqual(note, "")
+
+    def test_noop_when_disembodied(self):
+        from brain.motor import repair_motor_action
+        eff, args, note = repair_motor_action(
+            "shell", {"command": "page down"}, ["shell", "think", "finish"])
+        self.assertEqual(eff, "shell")
+        self.assertEqual(note, "")
+
+
+class EffectorAffordanceTests(unittest.TestCase):
+    """The affordance schemas the prefrontal now sees."""
+
+    def _effectors(self, embodied):
+        from brain.config import Config
+        from brain.effectors import Effectors
+        tmp = Path(tempfile.mkdtemp())
+        cfg = Config(raw={}, api_key="", base_url="http://x", require_auth=False,
+                     extra_headers={}, models={"reflex": "x", "executive": "y"},
+                     timeout_seconds=10, max_retries=0, sandbox_dir=tmp,
+                     db_path=tmp / "m.sqlite", loop={},
+                     memory={}, effectors={"filesystem": {"enabled": True},
+                                           "shell": {"enabled": True}}, regions={})
+        body = None
+        if embodied:
+            from afferent import Embodiment, FakeBackend
+            body = Embodiment(FakeBackend(), read_only=False)
+        return Effectors(cfg, embodiment=body)
+
+    def test_screen_affordances_present_when_embodied(self):
+        eff = self._effectors(embodied=True)
+        text = eff.render_affordances()
+        self.assertIn("screen_scroll", text)
+        self.assertIn("x_pct", text)          # click schema exposed
+        self.assertIn("SCREEN CONTROL", text)  # the anti-shell GUI rule
+        self.assertIn("NEVER use `shell`", text)
+
+    def test_no_screen_rule_when_disembodied(self):
+        eff = self._effectors(embodied=False)
+        text = eff.render_affordances()
+        self.assertNotIn("SCREEN CONTROL", text)
+        self.assertIn("shell{command}", text)
+
+
 class ScreenObserverTests(unittest.TestCase):
     """Capture loop + privacy spine — local-only, exclusion, pixel-drop."""
 

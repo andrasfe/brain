@@ -44,7 +44,7 @@ class Prefrontal(Region):
     )
 
     def next_thought(self, ws: Workspace, effectors: List[str],
-                     world_model=None) -> ThoughtUnit:
+                     world_model=None, affordances: str = "") -> ThoughtUnit:
         """Generate the next unit of the autoregressive thought chain.
 
         If a `world_model` (WorldModelStore) is provided, the PFC peeks at
@@ -120,14 +120,20 @@ class Prefrontal(Region):
                 "are ready."
             )
 
+        # Effector schemas: prefer the rich, available-effector affordances
+        # passed in by the orchestrator (includes the screen_* schemas + the
+        # 'never use shell for the GUI' rule). Fall back to the static list when
+        # none are supplied (eval/tests that call next_thought directly).
+        schema_block = affordances.strip() if affordances.strip() else (
+            "  read_file{path}; write_file{path,content}; list_dir{path};\n"
+            "  shell{command}; web_fetch{url}; think{note};\n"
+            "  remind_self{content, trigger, pattern}; finish{answer}")
         prompt = (
             ws.render_context(limit=8) + "\n\n"
             f"{voice}{intrusion_hint}{wm_hint}\n\n"
             f"{action_rules}\n"
-            "Effector arg schemas:\n"
-            "  read_file{path}; write_file{path,content}; list_dir{path};\n"
-            "  shell{command}; web_fetch{url}; think{note};\n"
-            "  remind_self{content, trigger, pattern}; finish{answer}\n\n"
+            "Effector arg schemas (use these EXACT names and args):\n"
+            f"{schema_block}\n\n"
             f"Produce the NEXT single thought-unit (step {step}) in your inner "
             "monologue. Keep `content` to 1-2 sentences; do not narrate your "
             "reasoning in `content`. Return JSON shaped EXACTLY like:\n"

@@ -41,6 +41,7 @@ from .persona import Persona, load_persona
 from .skills import SkillStore, prediction_surprise, signature_from_percept
 from .world_model import WorldModelStore, render_action, render_state
 from . import imagination as _imagination
+from .motor import repair_motor_action
 from .regions import (
     Amygdala,
     BasalGanglia,
@@ -493,7 +494,8 @@ class Brain:
             # ── prefrontal next thought (the autoregressive step) ──────────
             unit = self.prefrontal.next_thought(
                 ws, self.effectors.available(),
-                world_model=self.world_model)
+                world_model=self.world_model,
+                affordances=self.effectors.render_affordances())
             self.log(f"  • thought[{unit.step:02d} {unit.kind}]"
                      f"{' ⟪after intrusion⟫' if unit.interrupted else ''}: "
                      f"{unit.content[:100]}")
@@ -511,6 +513,18 @@ class Brain:
                 proposal = {"effector": (unit.args or {}).get("effector", "think"),
                              "args": (unit.args or {}).get("args") or unit.args,
                              "reasoning": unit.content}
+
+                # ── motor repair (deterministic) ──────────────────────────
+                # Fix obvious embodied mis-selections (shell-for-GUI, wrong
+                # screen args) BEFORE gating — turns veto-churn into a correct
+                # action and a real visual transition. No-op when disembodied.
+                if self.embodiment is not None:
+                    reff, rargs, rnote = repair_motor_action(
+                        proposal["effector"], proposal["args"],
+                        self.effectors.available())
+                    if rnote:
+                        self.log(f"  🔧 motor repair: {rnote}")
+                        proposal["effector"], proposal["args"] = reff, rargs
 
                 # Visual state captured once (screen actions, embodied): reused
                 # by the visual Monitor below AND the world-model 'before' row,
@@ -570,6 +584,14 @@ class Brain:
 
                 eff = gate.data.get("effector", proposal["effector"])
                 args = gate.data.get("args") or proposal["args"]
+
+                # Motor repair safety-net: the BG may have re-introduced a bad
+                # embodied shape while "repairing" — fix it again before dispatch.
+                if self.embodiment is not None:
+                    eff, args, rnote2 = repair_motor_action(
+                        eff, args, self.effectors.available())
+                    if rnote2:
+                        self.log(f"  🔧 motor repair (post-gate): {rnote2}")
 
                 # Defense-in-depth: BG can "repair" effector and sometimes
                 # repairs it INTO a bogus verb (e.g. "go for a walk" rather

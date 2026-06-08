@@ -63,6 +63,88 @@ class Effectors:
         names += ["think", "remind_self", "finish"]  # always-available internal effectors
         return names
 
+    # ── affordances: rich, schema-level self-description ────────────────────
+    # The prefrontal kept choosing `shell` to drive the GUI because it only saw
+    # bare effector NAMES with no screen schemas. Each affordance gives the
+    # model the exact args, when to use it, and the critical anti-pattern
+    # (never use shell to touch the screen). This is what makes embodied action
+    # reliable instead of a guessing game.
+    _AFFORDANCES: dict[str, dict[str, str]] = {
+        "read_file": {"args": "{path}",
+                      "use": "read a file inside the sandbox",
+                      "ex": '{"path": "notes.txt"}'},
+        "write_file": {"args": "{path, content}",
+                       "use": "create/overwrite a file in the sandbox",
+                       "ex": '{"path": "out.txt", "content": "hi"}'},
+        "list_dir": {"args": "{path}", "use": "list a sandbox directory",
+                     "ex": '{"path": "."}'},
+        "shell": {"args": "{command}",
+                  "use": "run a headless shell command INSIDE the sandbox dir",
+                  "ex": '{"command": "python3 script.py"}',
+                  "avoid": "NEVER use shell to scroll/click/type/keypress on "
+                           "the screen — it runs headless and cannot touch the "
+                           "GUI. Use the screen_* effectors for that."},
+        "web_fetch": {"args": "{url}", "use": "fetch a URL's text",
+                      "ex": '{"url": "https://example.com"}'},
+        "look": {"args": "{}",
+                 "use": "observe the screen with the eyes (returns what's "
+                        "visible); use before acting if unsure what's on screen",
+                 "ex": "{}"},
+        "screen_click": {
+            "args": "{x_pct: 0.0-1.0, y_pct: 0.0-1.0, button?: left|right, count?: int}",
+            "use": "click on the screen at a FRACTION of width/height "
+                   "(0,0 = top-left, 1,1 = bottom-right)",
+            "ex": '{"x_pct": 0.5, "y_pct": 0.12}  (top-center)'},
+        "screen_type": {
+            "args": "{text: str, append_enter?: bool}",
+            "use": "type text into the currently focused field",
+            "ex": '{"text": "hello", "append_enter": true}'},
+        "screen_key": {
+            "args": "{combo: str}",
+            "use": "press a single key or chord on the keyboard",
+            "ex": '{"combo": "cmd+c"} or {"combo": "return"} or {"combo": "esc"}',
+            "avoid": "for scrolling a view, prefer screen_scroll over paging keys"},
+        "screen_scroll": {
+            "args": "{amount: int (negative = down, positive = up), x_pct?, y_pct?}",
+            "use": "scroll the current view; use this for ANY scrolling",
+            "ex": '{"amount": -3}  (scroll down 3 steps)'},
+        "think": {"args": "{note}", "use": "a pure reasoning step (no effect)",
+                  "ex": '{"note": "weighing options"}'},
+        "remind_self": {"args": "{content, trigger, pattern}",
+                        "use": "set a prospective reminder for later",
+                        "ex": '{"content": "call mom", "trigger": "time", '
+                              '"pattern": "3600"}'},
+        "finish": {"args": "{answer}", "use": "end the task with the answer",
+                   "ex": '{"answer": "done: ..."}'},
+    }
+
+    def affordances(self, names: Optional[list[str]] = None) -> dict[str, dict]:
+        names = names if names is not None else self.available()
+        return {n: self._AFFORDANCES[n] for n in names if n in self._AFFORDANCES}
+
+    def render_affordances(self, names: Optional[list[str]] = None) -> str:
+        """A compact, model-facing schema block for the available effectors.
+        Leads with the GUI rule when screen effectors are present."""
+        names = names if names is not None else self.available()
+        affs = self.affordances(names)
+        lines: list[str] = []
+        has_screen = any(n.startswith("screen_") for n in names)
+        if has_screen:
+            lines.append(
+                "SCREEN CONTROL: to scroll, click, type, or press keys in any "
+                "visible app you MUST use the screen_* effectors below. NEVER "
+                "use `shell` (or osascript/cliclick) to control the GUI — shell "
+                "is headless and cannot touch the screen.")
+        for n in names:
+            a = affs.get(n)
+            if not a:
+                continue
+            line = f"  {n}{a['args']} — {a['use']}. e.g. {a['ex']}"
+            if a.get("avoid"):
+                line += f"  [{a['avoid']}]"
+            lines.append(line)
+        return "\n".join(lines)
+
     def execute(self, name: str, args: dict[str, Any]) -> tuple[bool, str]:
         fn = {
             "read_file": self._read_file,
