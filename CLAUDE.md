@@ -44,7 +44,8 @@ selected by `openrouter.provider` in `config.yaml`:
 
 The default `config.yaml` shipped on `main` targets **LM Studio** with three
 loaded models: `nvidia/nemotron-3-nano-omni` (reflex),
-`qwen3.6-35b-a3b-uncensored-genesis-v2-apex-mtp` (executive), and
+`qwen3.6-27b-mlx` (executive — vision-capable, used for both deliberation and
+the strong screen reads), and
 `text-embedding-embeddinggemma-300m-qat` (embeddings). The same
 `OpenRouterBackend` embeddings client works against LM Studio (the name is
 historical — it's just an OpenAI-compatible HTTP client). Nothing secret is
@@ -752,8 +753,8 @@ The default `config.yaml` is wired for LM Studio on macOS with three models
 loaded concurrently:
 
   - reflex: `nvidia/nemotron-3-nano-omni`
-  - executive: `qwen3.6-35b-a3b-uncensored-genesis-v2-apex-mtp` (MoE, ~3B
-    active per token → ~50 tok/s on M4)
+  - executive: `qwen3.6-27b-mlx` (vision-capable — drives both deliberation and
+    the strong content-change screen reads)
   - embeddings: `text-embedding-embeddinggemma-300m-qat` (768-dim)
 
 Verified end-to-end: `python run.py "<deliberative prompt>"` produces clean

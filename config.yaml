@@ -16,7 +16,7 @@ openrouter:
   # Model IDs must match exactly what LM Studio is serving (GET /v1/models).
   models:
     reflex:    "nvidia/nemotron-3-nano-omni"
-    executive: "qwen3.6-35b-a3b-uncensored-genesis-v2-apex-mtp"
+    executive: "qwen3.6-27b-mlx"
   timeout_seconds: 300                                  # 35B + M4 = patient
   max_retries: 1
 
