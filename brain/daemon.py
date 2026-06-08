@@ -240,6 +240,8 @@ class BrainDaemon:
                 deep_read_on_change=bool(cap_cfg.get("deep_read_on_change", True)),
                 content_change_threshold=float(
                     cap_cfg.get("content_change_threshold", 0.05)),
+                content_skip_threshold=float(
+                    cap_cfg.get("content_skip_threshold", 0.01)),
                 content_focus_window=bool(
                     cap_cfg.get("content_focus_window", True)),
                 job_queue=self.job_queue,

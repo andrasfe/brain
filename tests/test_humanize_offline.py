@@ -2853,6 +2853,53 @@ class ContentAwareReadingTests(unittest.TestCase):
         self.assertTrue(content_changed([1, 0, 0], [0, 1, 0], False, 0.12))   # far
         self.assertFalse(content_changed([1, 0, 0], [1, 0, 0.0], False, 0.12))  # near
 
+    def test_focused_content_unchanged_skips_llm(self):
+        # Background chrome (clock) makes the full-screen hash differ, but the
+        # focused window is unchanged (tiny DINOv2 distance) → skip the read,
+        # spare the LLM entirely.
+        try:
+            import numpy  # noqa: F401
+        except ImportError:
+            self.skipTest("numpy not installed")
+        from brain.observer import ScreenObserver
+        from brain.memory import Memory
+        from brain.embeddings import TfidfBackend
+        from brain.config import Config
+        from afferent import Embodiment, FakeBackend
+        from afferent.types import Observation, Frame
+        tmp = Path(tempfile.mkdtemp())
+        paths = []
+        for i in range(2):
+            p = tmp / f"f{i}.png"; p.write_bytes(b"png" + bytes([i])); paths.append(str(p))
+        cfg = Config(raw={"sandbox_dir": str(tmp)}, api_key="",
+                     base_url="http://localhost:1234/v1", require_auth=False,
+                     extra_headers={}, models={"reflex": "fast", "executive": "smart"},
+                     timeout_seconds=10, max_retries=0, sandbox_dir=tmp,
+                     db_path=tmp / "m.sqlite", loop={},
+                     memory={"embedding_backend": "openrouter"}, effectors={}, regions={})
+        emb = Embodiment(FakeBackend(script=[
+            Observation(ts=float(i), frontmost_app="Google Chrome",
+                        frame=Frame(id=f"f{i}", ts=float(i), path=paths[i]))
+            for i in range(2)]), read_only=True)
+        mem = Memory(cfg.db_path, backend=TfidfBackend())
+        llm = MagicMock(); llm.describe_image.return_value = "reading"
+        vemb = MagicMock(); vemb.available = True
+        # frame 1 establishes baseline (described); frame 2 is ~identical content
+        vemb.embed.side_effect = [[1.0, 0.0, 0.0], [1.0, 0.0, 0.0001]]
+        ob = ScreenObserver(cfg, llm, mem, emb, interval_seconds=0,
+                            min_interval_seconds=0,
+                            vision_model="fast", vision_model_strong="smart",
+                            content_focus_window=False, content_skip_threshold=0.01,
+                            visual_embedder=vemb)
+        ob._fingerprint = lambda _p: None        # full-screen hash never dedups
+        ob.maybe_capture(force=True)             # frame 1 → described (baseline set)
+        n_after_first = llm.describe_image.call_count
+        res = ob.maybe_capture(force=False)      # frame 2 → focused content unchanged
+        self.assertFalse(res["captured"])
+        self.assertEqual(res["reason"], "content_unchanged")
+        self.assertEqual(llm.describe_image.call_count, n_after_first)  # no extra LLM
+        mem.close()
+
     def test_strong_model_fires_on_content_change_same_app(self):
         try:
             import numpy  # noqa: F401 — cosine_distance needs it
@@ -2884,7 +2931,9 @@ class ContentAwareReadingTests(unittest.TestCase):
         llm = MagicMock(); llm.describe_image.return_value = "Reading a thread about X"
         vemb = MagicMock(); vemb.available = True
         # v1 (first→strong), v2 near v1 (→fast), v3 far (→strong)
-        vemb.embed.side_effect = [[1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
+        # frame2 is a MINOR change (dist ~0.03: above skip 0.01, below change 0.12)
+        # → fast; frame3 is a big change → strong.
+        vemb.embed.side_effect = [[1.0, 0.0, 0.0], [1.0, 0.25, 0.0], [0.0, 1.0, 0.0]]
         ob = ScreenObserver(cfg, llm, mem, emb, interval_seconds=0,
                             vision_model="fast", vision_model_strong="smart",
                             content_change_threshold=0.12, visual_embedder=vemb)

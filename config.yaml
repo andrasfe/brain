@@ -160,6 +160,7 @@ capture:
   # (visual_embed: dinov2); else falls back to app-switch only.
   deep_read_on_change: true
   content_change_threshold: 0.05   # DINOv2 cosine distance that counts as "new content"
+  content_skip_threshold: 0.01     # below this (focused window unchanged) skip the read entirely — spares the LLM even when background chrome (clock) ticks
   # Content grabbing crops to the FRONTMOST WINDOW (full-screen capture stays):
   # sharper change signal (no static chrome), cleaner reads, background windows
   # excluded. Falls back to the full frame when window bounds are unavailable.

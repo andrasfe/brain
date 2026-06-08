@@ -265,6 +265,7 @@ class ScreenObserver:
                  change_detect: bool = True,
                  deep_read_on_change: bool = True,
                  content_change_threshold: float = 0.05,
+                 content_skip_threshold: float = 0.01,
                  content_focus_window: bool = True,
                  job_queue=None,
                  defer_strong: bool = True,
@@ -281,6 +282,10 @@ class ScreenObserver:
         self.vision_model_strong = vision_model_strong or cfg.models.get("executive", "")
         self.deep_read_on_change = deep_read_on_change
         self.content_change_threshold = float(content_change_threshold)
+        # Below this focused-window distance the content is unchanged → skip the
+        # read entirely (spare even the fast model), even if full-screen chrome
+        # (a ticking clock) made the perceptual hash differ.
+        self.content_skip_threshold = float(content_skip_threshold)
         # Content grabbing crops to the FRONTMOST WINDOW (not the full screen):
         # sharper change signal, cleaner reads, background windows excluded.
         self.content_focus_window = content_focus_window
@@ -550,6 +555,22 @@ class ScreenObserver:
             from .screen_model import cosine_distance
             content_dist = round(float(cosine_distance(
                 vis_vec, self._last_described_vec)), 4)
+
+        # FOCUSED-CONTENT SKIP: the window's content is essentially unchanged
+        # (only background chrome moved) → spare the LLM entirely. We keep the
+        # last-described baseline so slow drift still accumulates to a real read.
+        if (not force and not app_switched and content_dist is not None
+                and content_dist < self.content_skip_threshold):
+            for _p in (path, focus_path):
+                if _p:
+                    try:
+                        os.remove(_p)
+                    except OSError:
+                        pass
+            self.deduped += 1
+            return {"captured": False, "reason": "content_unchanged",
+                    "content_dist": content_dist}
+
         changed = bool(
             app_switched
             or (vis_vec is not None and self._last_described_vec is None)
