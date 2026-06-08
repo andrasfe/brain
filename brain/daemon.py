@@ -131,6 +131,7 @@ class BrainDaemon:
         # World — same instance lives across the daemon's life
         self.world = brain.world
         self.state: str = WAKE
+        self._interactive_busy = False   # True while a Brain.run holds the GPU
         self.tick_n: int = 0
         self.input_q: "queue.Queue[str]" = queue.Queue()
         self.stats = DaemonStats()
@@ -310,16 +311,20 @@ class BrainDaemon:
         self.adapters.append(adapter)
 
     def _worker_should_drain(self) -> bool:
-        """Gate the strong-read worker: drain freely when asleep or the user is
-        away (latency is free then); while awake, only drain when a backlog
-        builds, so deep reads don't contend with interactive work on the GPU."""
+        """Gate the strong-read worker. Never while an interactive task is
+        running (avoid GPU contention with Brain.run). Otherwise drain freely
+        when asleep/away (latency is free), and — while awake and idle — after a
+        short coalescing window so a burst of scrolls collapses to the freshest
+        frame yet reads still land within ~15s."""
         if self.job_queue is None:
+            return False
+        if self._interactive_busy:
             return False
         if self.state in (DROWSY, NREM, REM) or self._user_present is False:
             return True
         try:
-            return (self.job_queue.depth("deep_read") >= 8
-                    or (self.job_queue.oldest_age() or 0.0) >= 180.0)
+            return ((self.job_queue.oldest_age() or 0.0) >= 12.0
+                    or self.job_queue.depth("deep_read") >= 5)
         except Exception:
             return False
 
@@ -873,12 +878,14 @@ class BrainDaemon:
         # Pass the live affect by reference
         affect_ref = self.affect
         self.brain._build_initial_affect = lambda: affect_ref  # type: ignore
+        self._interactive_busy = True   # pause the deep-read worker (GPU)
         try:
             answer = self.brain.run(task)
             if not quiet:
                 self.log("\n" + "═" * 40 + "\nBRAIN:\n" + "═" * 40)
                 self.log(answer)
         finally:
+            self._interactive_busy = False
             self.brain._build_initial_affect = original
             self.brain.cfg.loop = original_loop
             self.brain.log = original_log

@@ -634,13 +634,17 @@ class ScreenObserver:
                 try:
                     # Human-driven reads outrank autonomous ones in the queue.
                     pr = (10 if app_switched else (6 if agency == "active" else 3))
+                    # TTL must be WALL-CLOCK: the queue compares not_after_ts
+                    # against time.time(), while `now` here is the observer's
+                    # monotonic clock (used for capture-rate timing). Mixing them
+                    # made every job look already-expired → dropped unprocessed.
                     self.job_queue.enqueue(
                         "deep_read",
                         {"spool": spool, "app": app, "vec": vis_vec,
                          "agency": agency},
                         priority=pr,
                         dedup_key=f"win:{(app or 'unknown').lower()}",
-                        not_after_ts=now + self.deep_read_ttl_seconds)
+                        not_after_ts=time.time() + self.deep_read_ttl_seconds)
                     self.job_queue.trim("deep_read", self.max_queued_reads)
                 except Exception:
                     pass
