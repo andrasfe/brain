@@ -1896,6 +1896,17 @@ class JobQueueTests(unittest.TestCase):
         self.assertEqual(q.oldest_age(now=30.0), 20.0)   # 30 - 10
         q.close()
 
+    def test_trim_backpressure_drops_lowest_priority(self):
+        q = self._q()
+        q.enqueue("deep_read", {"k": "lo1"}, priority=1, now=1.0)
+        q.enqueue("deep_read", {"k": "hi"}, priority=9, now=2.0)
+        q.enqueue("deep_read", {"k": "lo2"}, priority=1, now=3.0)
+        dropped = q.trim("deep_read", max_pending=1)          # keep only the best
+        self.assertEqual(dropped, 2)
+        self.assertEqual(q.depth("deep_read"), 1)
+        self.assertEqual(q.claim(now=10.0)["payload"]["k"], "hi")  # kept the priority job
+        q.close()
+
 
 class WorkerQueueTests(unittest.TestCase):
     """Q1 — worker drains jobs; deep_read handler; observer enqueues vs inline."""

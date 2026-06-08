@@ -143,6 +143,12 @@ def render_text(snap: dict) -> str:
                      f"skipped={cap.get('skipped',0)} "
                      f"privacy_ok={cap.get('privacy_ok')}"
                      + ("" if cap.get("privacy_ok", True) else f" [{cap.get('reason','')}]"))
+    q = d.get("queue")
+    if q:
+        lines.append(f" queue  : depth={q.get('depth',0)} "
+                     f"oldest={q.get('oldest_age',0)}s "
+                     f"done={q.get('done',0)} failed={q.get('failed',0)} "
+                     f"dropped={q.get('dropped',0)}")
     dk = snap.get("disk", {})
     lines.append(f" disk   : memory={dk.get('memory_db_mb',0)}MB  "
                  f"capture pngs={dk.get('capture_pngs',0)} "

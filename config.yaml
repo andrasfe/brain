@@ -171,6 +171,7 @@ capture:
   # fast reads stay inline. Set false to read inline as before.
   defer_strong_reads: true
   deep_read_ttl_seconds: 600   # drop a queued deep read older than this (stale screen)
+  max_queued_reads: 200        # backpressure: cap pending deep reads (drop oldest/lowest)
   # Screen-state representation for the sequence model:
   #   "none"   — embed the text description (EmbeddingGemma) [default]
   #   "dinov2" — embed the screenshot with local DINOv2 (needs torch; no uploads)

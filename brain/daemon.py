@@ -245,6 +245,7 @@ class BrainDaemon:
                 job_queue=self.job_queue,
                 defer_strong=defer_strong,
                 deep_read_ttl_seconds=float(cap_cfg.get("deep_read_ttl_seconds", 600)),
+                max_queued_reads=int(cap_cfg.get("max_queued_reads", 200)),
                 visual_embedder=getattr(brain, "visual_embedder", None),
             )
             if not self.observer.ok:

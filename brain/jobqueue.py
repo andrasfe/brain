@@ -202,6 +202,24 @@ class JobQueue:
             self.conn.commit()
             return {"dropped": dropped, "deleted": cur.rowcount}
 
+    def trim(self, kind: str, max_pending: int) -> int:
+        """Backpressure: keep at most `max_pending` pending jobs of `kind`,
+        dropping the LOWEST priority + oldest beyond the cap. Returns dropped."""
+        with self._lock:
+            ids = [int(r["id"]) for r in self.conn.execute(
+                "SELECT id FROM jobs WHERE status=? AND kind=? "
+                "ORDER BY priority DESC, enqueued_ts ASC, id ASC",
+                (PENDING, kind)).fetchall()]
+            victims = ids[max_pending:]
+            if not victims:
+                return 0
+            q = ",".join("?" for _ in victims)
+            self.conn.execute(
+                f"UPDATE jobs SET status=? WHERE id IN ({q})",
+                [DROPPED] + victims)
+            self.conn.commit()
+            return len(victims)
+
     # ── inspection ──────────────────────────────────────────────────────────
     def depth(self, kind: Optional[str] = None) -> int:
         with self._lock:

@@ -269,6 +269,7 @@ class ScreenObserver:
                  job_queue=None,
                  defer_strong: bool = True,
                  deep_read_ttl_seconds: float = 600.0,
+                 max_queued_reads: int = 200,
                  visual_embedder=None,
                  time_fn=time.monotonic):
         self.visual_embedder = visual_embedder
@@ -289,6 +290,7 @@ class ScreenObserver:
         self.job_queue = job_queue
         self.defer_strong = defer_strong
         self.deep_read_ttl_seconds = float(deep_read_ttl_seconds)
+        self.max_queued_reads = int(max_queued_reads)
         self._spool_dir = Path(cfg.sandbox_dir) / "spool"
         self._last_described_vec = None   # DINOv2 vec of the last frame we read
         self.queued = 0
@@ -581,6 +583,7 @@ class ScreenObserver:
                         priority=10 if app_switched else 5,
                         dedup_key=f"win:{(app or 'unknown').lower()}",
                         not_after_ts=now + self.deep_read_ttl_seconds)
+                    self.job_queue.trim("deep_read", self.max_queued_reads)
                 except Exception:
                     pass
                 if vis_vec is not None:
