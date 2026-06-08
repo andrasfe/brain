@@ -558,7 +558,29 @@ either recovers ("Forget the cat; …") or drifts.
   sandbox-confined — they act on the host — so the afferent `SafetyGate`
   (read-only default, confirm callback, rate limit) plus the basal ganglia
   gate are the protection. Each is advertised only when the body's
-  `capabilities()` include it.
+  `capabilities()` include it. NOTE: the macOS afferent backend has no scroll
+  capability — scrolling is done via `screen_key` (`pagedown`/`pageup`/arrows).
+  `Effectors.affordances()` / `render_affordances()` give the prefrontal the
+  exact arg schemas + the rule "never use shell to control the GUI", so the
+  model stops reaching for `shell` to drive the screen.
+
+- **`brain/motor.py`** — `repair_motor_action()`: deterministic correction of
+  mis-selected embodied actions before gating (shell-for-scroll → the right
+  paging key / scroll, arg aliases `content→text`, `x/y→x_pct/y_pct`, scroll
+  intent routed to whatever hands actually exist). Turns BG-veto churn into a
+  real action. No-op when disembodied.
+
+- **`brain/regions/motor_cortex.py`** — `MotorCortex` (executive tier): when the
+  prefrontal narrates a screen step ("I'm scrolling now") as `tentative_plan`
+  but never commits, this grounds the intent into ONE concrete effector call
+  (real coordinates / paging key from the live screen) and the orchestrator
+  promotes it to `kind='action'`. Config: `embodiment.motor_cortex` (off by
+  default — an extra LLM call worth spending on action grounding).
+
+- **`brain/vision_embed.py`** — DINOv2 screen embeddings. Loads via **timm**
+  (`vit_*_patch14_dinov2.lvd142m`) on Python 3.9 — the facebookresearch hub code
+  needs 3.10+ syntax. Needs `pip install torch torchvision timm`; guarded, falls
+  back to text embeddings when absent.
 
 - **`brain/orchestrator.py`** — `Brain` ties it together and runs the cognitive
   cycle described above. Logging is injected via a `log` callback; shell
