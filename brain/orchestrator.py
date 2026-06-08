@@ -52,10 +52,12 @@ from .regions import (
     Hippocampus,
     Interoception,
     LocusCoeruleus,
+    MotorCortex,
     Predictor,
     Prefrontal,
     SensoryCortex,
     VTA,
+    has_motor_intent,
 )
 from .workspace import ActionRecord, Broadcast, ThoughtUnit, Workspace
 from .world import World
@@ -151,6 +153,13 @@ class Brain:
                 world_model=self.world_model,
                 min_rows=int(plan_cfg.get("min_rows", 40)),
                 veto_floor=float(plan_cfg.get("veto_floor", 0.30)))
+
+        # Motor cortex — executive-tier action grounding. Converts narrated
+        # screen-intent into a concrete effector call when the prefrontal stalls
+        # in rehearsal. Only when embodied + enabled (it's an extra LLM call).
+        self.motor_cortex = None
+        if self.embodiment is not None and (cfg.embodiment or {}).get("motor_cortex"):
+            self.motor_cortex = MotorCortex(cfg, self.llm)
 
         # Occipital (eyes) — only when embodied.
         self.occipital = None
@@ -499,6 +508,28 @@ class Brain:
             self.log(f"  • thought[{unit.step:02d} {unit.kind}]"
                      f"{' ⟪after intrusion⟫' if unit.interrupted else ''}: "
                      f"{unit.content[:100]}")
+
+            # ── motor-cortex promotion: narration → real action ────────────
+            # The model often *describes* a screen step ('I'm scrolling now')
+            # as tentative_plan and never commits an action. When embodied and
+            # the content reads like motor intent, the executive motor cortex
+            # grounds it into a concrete effector call so the world actually
+            # changes (and a real visual transition is recorded).
+            if (self.motor_cortex is not None
+                    and unit.kind in ("tentative_plan", "reflect")
+                    and has_motor_intent(unit.content)):
+                try:
+                    plan = self.motor_cortex.plan_action(
+                        ws, self.effectors.render_affordances(), unit.content)
+                except Exception as e:  # noqa: BLE001 — never break the loop
+                    plan = None
+                    self.log(f"  ⚠ motor_cortex skipped: {type(e).__name__}: {e}")
+                if plan and plan["effector"] in self.effectors.available():
+                    self.log(f"  🧠 motor cortex commits: {plan['effector']} "
+                             f"{plan['reasoning']}")
+                    unit.kind = "action"
+                    unit.args = {"effector": plan["effector"],
+                                 "args": plan["args"]}
 
             # ── commit gates ───────────────────────────────────────────────
             if unit.kind == "finish":

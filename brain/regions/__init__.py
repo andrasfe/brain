@@ -11,6 +11,7 @@ from .locus_coeruleus import LocusCoeruleus
 from .vta import VTA
 from .cerebellum import Cerebellum, CerebellumPrediction
 from .predictor import Predictor, PlanEvaluation
+from .motor_cortex import MotorCortex, has_motor_intent
 from .occipital import Occipital
 
 __all__ = [
@@ -28,5 +29,7 @@ __all__ = [
     "CerebellumPrediction",
     "Predictor",
     "PlanEvaluation",
+    "MotorCortex",
+    "has_motor_intent",
     "Occipital",
 ]

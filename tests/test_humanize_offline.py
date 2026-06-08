@@ -2511,6 +2511,49 @@ class MotorRepairTests(unittest.TestCase):
         self.assertEqual(note, "")
 
 
+class MotorCortexTests(unittest.TestCase):
+    """Narration→action grounding via the executive motor cortex."""
+
+    def test_has_motor_intent(self):
+        from brain.regions import has_motor_intent
+        self.assertTrue(has_motor_intent("I'm scrolling down now"))
+        self.assertTrue(has_motor_intent("clicking the Submit button"))
+        self.assertTrue(has_motor_intent("typing my reply"))
+        self.assertFalse(has_motor_intent("I feel bored and a bit hungry"))
+        self.assertFalse(has_motor_intent(""))
+
+    def test_plan_action_returns_concrete_effector(self):
+        from brain.regions.motor_cortex import MotorCortex
+        from brain.config import Config
+        cfg = Config(raw={}, api_key="", base_url="http://x", require_auth=False,
+                     extra_headers={}, models={"reflex": "x", "executive": "y"},
+                     timeout_seconds=10, max_retries=0,
+                     sandbox_dir=Path(tempfile.mkdtemp()),
+                     db_path=Path(tempfile.mkdtemp()) / "m.sqlite", loop={},
+                     memory={}, effectors={}, regions={"motor_cortex": "executive"})
+        mc = MotorCortex(cfg, llm=MagicMock())
+        mc._chat_json = lambda *a, **k: {"effector": "screen_scroll",
+                                         "args": {"amount": -3}, "reason": "scroll down"}
+        ws = Workspace(task="scroll")
+        plan = mc.plan_action(ws, "screen_scroll{amount}", "I'm scrolling down now")
+        self.assertEqual(plan["effector"], "screen_scroll")
+        self.assertEqual(plan["args"], {"amount": -3})
+
+    def test_plan_action_abstains_on_none(self):
+        from brain.regions.motor_cortex import MotorCortex
+        from brain.config import Config
+        cfg = Config(raw={}, api_key="", base_url="http://x", require_auth=False,
+                     extra_headers={}, models={"reflex": "x", "executive": "y"},
+                     timeout_seconds=10, max_retries=0,
+                     sandbox_dir=Path(tempfile.mkdtemp()),
+                     db_path=Path(tempfile.mkdtemp()) / "m.sqlite", loop={},
+                     memory={}, effectors={}, regions={})
+        mc = MotorCortex(cfg, llm=MagicMock())
+        mc._chat_json = lambda *a, **k: {"effector": "none"}
+        plan = mc.plan_action(Workspace(task="t"), "aff", "thinking about lunch")
+        self.assertIsNone(plan)
+
+
 class EffectorAffordanceTests(unittest.TestCase):
     """The affordance schemas the prefrontal now sees."""
 

@@ -105,6 +105,7 @@ class Prefrontal(Region):
         # mental-rehearsal lane (tentative_plan / reflect) and emit `finish`
         # when ready with the answer.
         nontrivial_eff = [e for e in effectors if e not in ("think", "finish")]
+        screen_eff = [e for e in effectors if e.startswith("screen_")]
         action_rules = (
             f"You may emit kind='action' ONLY with effector ∈ {effectors}; the "
             "effector string must match EXACTLY one of those names — do not "
@@ -112,6 +113,15 @@ class Prefrontal(Region):
             "a message or rehearse a reply mentally, use kind='tentative_plan' "
             "with the draft in `content`."
         )
+        if screen_eff:
+            action_rules += (
+                " IMPORTANT — you have HANDS (" + ", ".join(screen_eff) + "). To "
+                "actually DO a screen step you MUST emit kind='action' with the "
+                "screen effector and its args. Narrating it ('I'm scrolling "
+                "now', 'executing the scroll') as kind='tentative_plan' does "
+                "NOTHING — nothing happens until you emit kind='action'. Only use "
+                "tentative_plan for a step no effector can perform."
+            )
         if not nontrivial_eff:
             action_rules += (
                 " No external tools are available here — keep deliberating "

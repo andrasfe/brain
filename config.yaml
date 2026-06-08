@@ -69,6 +69,7 @@ regions:
   hippocampus:       reflex
   prefrontal:        executive
   broca:             executive
+  motor_cortex:      executive   # action grounding deserves the strong model
   # humanization regions
   interoception:     reflex   # deterministic, no LLM call anyway
   default_mode:      reflex   # tangents should feel half-formed
@@ -127,6 +128,10 @@ embodiment:
   observe_every: 3            # occipital posts a vision broadcast every N steps
   describe_with_vision: true  # describe screenshots via the vision model
   vision_model: ""            # blank = reflex-tier model
+  # Motor cortex: when the prefrontal narrates a screen action but never commits
+  # one, an executive-tier pass grounds the intent into a concrete effector call
+  # (picks coordinates / scroll amount from the live screen). Extra LLM call.
+  motor_cortex: false
 
 # Screen observation — the brain passively watches your screen to learn your
 # activity. PRIVACY-FIRST: refuses to run unless the LLM/embedding endpoint is
