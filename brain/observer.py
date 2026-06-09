@@ -296,6 +296,7 @@ class ScreenObserver:
                  deep_read_on_change: bool = True,
                  content_change_threshold: float = 0.05,
                  content_skip_threshold: float = 0.01,
+                 deep_read_min_interval_seconds: float = 45.0,
                  content_focus_window: bool = True,
                  job_queue=None,
                  defer_strong: bool = True,
@@ -316,6 +317,11 @@ class ScreenObserver:
         # read entirely (spare even the fast model), even if full-screen chrome
         # (a ticking clock) made the perceptual hash differ.
         self.content_skip_threshold = float(content_skip_threshold)
+        # The slow strong model is the periodic DEEP DIVE, not the default —
+        # at most one strong read per this interval. Between deep reads, changed
+        # frames get a quick fast (reflex) read so 27b never dominates.
+        self.deep_read_min_interval_seconds = float(deep_read_min_interval_seconds)
+        self._last_strong_ts = -1e9
         # Content grabbing crops to the FRONTMOST WINDOW (not the full screen):
         # sharper change signal, cleaner reads, background windows excluded.
         self.content_focus_window = content_focus_window
@@ -608,6 +614,14 @@ class ScreenObserver:
                 and content_dist >= self.content_change_threshold))
         use_strong = (changed and self.deep_read_on_change
                       and bool(self.vision_model_strong))
+        # Rate-limit the strong model to a periodic deep dive. A changed frame
+        # within the cooldown gets a fast read instead, so the slow 27b runs at
+        # most ~once per interval rather than on every scroll / app-switch.
+        if (use_strong and
+                (now - self._last_strong_ts) < self.deep_read_min_interval_seconds):
+            use_strong = False
+        if use_strong:
+            self._last_strong_ts = now
 
         trigger = ("app_switch" if app_switched
                    else ("content_change" if changed else "timer"))

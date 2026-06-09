@@ -2926,6 +2926,54 @@ class ContentAwareReadingTests(unittest.TestCase):
         self.assertEqual(llm.describe_image.call_count, n_after_first)  # no extra LLM
         mem.close()
 
+    def test_strong_model_rate_limited_between_deep_reads(self):
+        # Two big content changes in quick succession: the first is a strong
+        # read, the second is rate-limited down to the fast model.
+        try:
+            import numpy  # noqa: F401
+        except ImportError:
+            self.skipTest("numpy not installed")
+        from brain.observer import ScreenObserver
+        from brain.memory import Memory
+        from brain.embeddings import TfidfBackend
+        from brain.config import Config
+        from afferent import Embodiment, FakeBackend
+        from afferent.types import Observation, Frame
+        tmp = Path(tempfile.mkdtemp())
+        paths = [str(tmp / f"f{i}.png") for i in range(3)]
+        for i, pp in enumerate(paths):
+            Path(pp).write_bytes(b"png" + bytes([i]))
+        cfg = Config(raw={"sandbox_dir": str(tmp)}, api_key="",
+                     base_url="http://localhost:1234/v1", require_auth=False,
+                     extra_headers={}, models={"reflex": "fast", "executive": "smart"},
+                     timeout_seconds=10, max_retries=0, sandbox_dir=tmp,
+                     db_path=tmp / "m.sqlite", loop={},
+                     memory={"embedding_backend": "openrouter"}, effectors={}, regions={})
+        emb = Embodiment(FakeBackend(script=[
+            Observation(ts=float(i), frontmost_app="Google Chrome",
+                        frame=Frame(id=f"f{i}", ts=float(i), path=paths[i]))
+            for i in range(3)]), read_only=True)
+        mem = Memory(cfg.db_path, backend=TfidfBackend())
+        llm = MagicMock(); llm.describe_image.return_value = "reading"
+        vemb = MagicMock(); vemb.available = True
+        # 3 mutually-distant frames → all "content change"; rate limit gates #2,#3
+        vemb.embed.side_effect = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+        clock = {"t": 1000.0}
+        ob = ScreenObserver(cfg, llm, mem, emb, interval_seconds=0,
+                            min_interval_seconds=0, vision_model="fast",
+                            vision_model_strong="smart", content_focus_window=False,
+                            deep_read_min_interval_seconds=45.0, visual_embedder=vemb,
+                            time_fn=lambda: clock["t"])
+        ob._fingerprint = lambda _p: None
+        tiers = []
+        for _ in range(3):
+            clock["t"] += 5.0                      # 5s apart — within cooldown
+            tiers.append(ob.maybe_capture(force=True)["model_tier"])
+        self.assertEqual(tiers[0], "strong")        # first deep dive
+        self.assertEqual(tiers[1], "fast")          # rate-limited
+        self.assertEqual(tiers[2], "fast")          # still within cooldown
+        mem.close()
+
     def test_strong_model_fires_on_content_change_same_app(self):
         try:
             import numpy  # noqa: F401 — cosine_distance needs it
@@ -2962,7 +3010,8 @@ class ContentAwareReadingTests(unittest.TestCase):
         vemb.embed.side_effect = [[1.0, 0.0, 0.0], [1.0, 0.25, 0.0], [0.0, 1.0, 0.0]]
         ob = ScreenObserver(cfg, llm, mem, emb, interval_seconds=0,
                             vision_model="fast", vision_model_strong="smart",
-                            content_change_threshold=0.12, visual_embedder=vemb)
+                            content_change_threshold=0.12,
+                            deep_read_min_interval_seconds=0, visual_embedder=vemb)
         ob._fingerprint = lambda _p: None    # disable hash dedup
         models = []
         for _ in range(3):

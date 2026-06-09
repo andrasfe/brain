@@ -161,6 +161,7 @@ capture:
   deep_read_on_change: true
   content_change_threshold: 0.05   # DINOv2 cosine distance that counts as "new content"
   content_skip_threshold: 0.01     # below this (focused window unchanged) skip the read entirely — spares the LLM even when background chrome (clock) ticks
+  deep_read_min_interval_seconds: 45   # the slow strong model is a periodic DEEP DIVE: at most one strong read per this interval; changed frames in between get a quick fast read
   # Content grabbing crops to the FRONTMOST WINDOW (full-screen capture stays):
   # sharper change signal (no static chrome), cleaner reads, background windows
   # excluded. Falls back to the full frame when window bounds are unavailable.
