@@ -198,3 +198,18 @@ capture:
   max_age_days: 30
   max_rows: 20000
   max_dir_mb: 200
+
+# Wellness — the brain occasionally looks at YOU via the webcam: one still
+# every ~interval (jittered), the strong local VLM reads visible fatigue /
+# focus / mood, ONLY the inference is recorded (pixels deleted; prompt forbids
+# identifying people or describing surroundings). Readings are wellness-tagged
+# observations — Recall can answer "how did I look today?" and the nightly
+# journal folds them in. Present-only; deferred via the job queue; refuses on
+# non-local endpoints. Off by default. One-shot: python3 -m brain.wellness
+wellness:
+  enabled: false
+  interval_seconds: 1500      # ~25 min between self-checks
+  jitter_seconds: 300         # randomize so it isn't metronomic
+  ttl_seconds: 600            # a stale face reading is worthless — drop it
+  camera_warmup_seconds: 1.2  # skip the dark first frames
+  camera_device: "0"          # avfoundation device index (default camera)

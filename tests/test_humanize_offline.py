@@ -1952,6 +1952,110 @@ class JournalistTests(unittest.TestCase):
         mem.close()
 
 
+class WellnessTests(unittest.TestCase):
+    """Webcam self-check — cadence, privacy spine, analysis, recording."""
+
+    def _cfg(self, base_url="http://localhost:1234/v1"):
+        from brain.config import Config
+        tmp = Path(tempfile.mkdtemp())
+        return Config(raw={}, api_key="", base_url=base_url, require_auth=False,
+                      extra_headers={}, models={"reflex": "fast", "executive": "smart"},
+                      timeout_seconds=10, max_retries=0, sandbox_dir=tmp,
+                      db_path=tmp / "m.sqlite", loop={},
+                      memory={"embedding_backend": "openrouter"}, effectors={},
+                      regions={}, capture={"vision_model_strong": ""})
+
+    def _observer(self, cfg=None, shoot_ok=True, **kw):
+        from brain.wellness import WellnessObserver
+        from brain.jobqueue import JobQueue
+        cfg = cfg or self._cfg()
+        q = JobQueue(Path(tempfile.mkdtemp()) / "j.sqlite")
+        clock = {"t": 1000.0}
+
+        def shoot(dest, **_kw):
+            if shoot_ok:
+                Path(dest).write_bytes(b"png")
+            return shoot_ok
+
+        import random as _r
+        ob = WellnessObserver(cfg, q, interval_seconds=100, jitter_seconds=0,
+                              time_fn=lambda: clock["t"], shoot_fn=shoot,
+                              rng=_r.Random(0), **kw)
+        return ob, q, clock
+
+    def test_refuses_remote_endpoint(self):
+        ob, q, _ = self._observer(cfg=self._cfg("https://api.example.com/v1"))
+        self.assertFalse(ob.ok)
+        self.assertFalse(ob.maybe_check(present=True)["checked"])
+        q.close()
+
+    def test_cadence_present_only_and_enqueue(self):
+        ob, q, clock = self._observer()
+        clock["t"] = 2000.0                       # past the initial delay
+        self.assertFalse(ob.maybe_check(present=False)["checked"])  # away
+        out = ob.maybe_check(present=True)
+        self.assertTrue(out["checked"])
+        self.assertTrue(Path(out["spool"]).exists())      # photo spooled
+        self.assertEqual(q.depth("wellness_check"), 1)
+        # immediately again → not due (interval gate)
+        self.assertEqual(ob.maybe_check(present=True)["reason"], "not due")
+        clock["t"] += 101.0
+        self.assertTrue(ob.maybe_check(present=True)["checked"])
+        q.close()
+
+    def test_camera_failure_is_graceful(self):
+        ob, q, clock = self._observer(shoot_ok=False)
+        clock["t"] = 2000.0
+        out = ob.maybe_check(present=True)
+        self.assertFalse(out["checked"])
+        self.assertEqual(q.depth(), 0)
+        q.close()
+
+    def test_analyze_parses_clamps_and_skips_no_person(self):
+        from brain.wellness import analyze_wellness
+        llm = MagicMock(spec=["describe_image"])
+        llm.describe_image.return_value = (
+            'Some preamble. {"person_visible": true, "fatigue": 1.7, '
+            '"tension": -0.2, "mood": "Tired", '
+            '"summary": "They look drowsy with heavy eyelids."}')
+        r = analyze_wellness(llm, "smart", "/tmp/x.png")
+        self.assertEqual(r["fatigue"], 1.0)        # clamped
+        self.assertEqual(r["tension"], 0.0)        # clamped
+        self.assertEqual(r["mood"], "tired")
+        self.assertIn("drowsy", r["summary"])
+        llm.describe_image.return_value = '{"person_visible": false}'
+        self.assertIsNone(analyze_wellness(llm, "smart", "/tmp/x.png"))
+
+    def test_handler_records_and_drops_pixels(self):
+        from brain.workers import run_wellness_check
+        from brain.memory import Memory, OBSERVATION
+        from brain.embeddings import TfidfBackend
+        cfg = self._cfg()
+        spool = Path(tempfile.mkdtemp()) / "w.spool.png"
+        spool.write_bytes(b"png")
+        mem = Memory(cfg.db_path, backend=TfidfBackend())
+        llm = MagicMock(spec=["describe_image"])
+        llm.describe_image.return_value = (
+            '{"person_visible": true, "fatigue": 0.6, "tension": 0.3, '
+            '"mood": "focused", "summary": "Alert but with tired eyes."}')
+        run_wellness_check({"spool": str(spool)},
+                           {"cfg": cfg, "llm": llm, "memory": mem})
+        self.assertFalse(spool.exists())           # pixels dropped
+        row = mem.conn.execute(
+            "SELECT content, tags FROM episodes WHERE mem_type=?",
+            (OBSERVATION,)).fetchone()
+        self.assertIn("[wellness]", row["content"])
+        self.assertIn("fatigue=0.6", row["content"])
+        self.assertEqual(llm.describe_image.call_args[0][0], "smart")  # executive
+        mem.close()
+
+    def test_prompt_has_privacy_rules(self):
+        from brain.wellness import build_wellness_instruction
+        p = build_wellness_instruction()
+        self.assertIn("Do NOT identify", p)
+        self.assertIn("other", p.lower())
+
+
 class JobQueueTests(unittest.TestCase):
     """Durable SQLite job queue — priority, lease, dedup, TTL, retry."""
 

@@ -138,4 +138,33 @@ def run_deep_read(payload: dict, ctx: dict) -> None:
         log(f"  🧠 deep-read [{app}/{agency}] → {description[:120]}")
 
 
-DEFAULT_HANDLERS = {"deep_read": run_deep_read}
+def run_wellness_check(payload: dict, ctx: dict) -> None:
+    """Strong-model read of a spooled webcam still → wellness observation.
+    Pixels always deleted; a missing spool / no-person reading is a no-op."""
+    import os
+    from .wellness import analyze_wellness, record_wellness
+
+    cfg = ctx["cfg"]
+    spool = payload.get("spool")
+    if not spool or not os.path.exists(spool):
+        return
+    model = (str((cfg.capture or {}).get("vision_model_strong", ""))
+             or cfg.models.get("executive", ""))
+    try:
+        reading = analyze_wellness(ctx["llm"], model, spool)
+    finally:
+        try:
+            os.remove(spool)               # PIXEL-DROP, unconditionally
+        except OSError:
+            pass
+    if reading is None:
+        return
+    record_wellness(ctx["memory"], reading)
+    log = ctx.get("log")
+    if log:
+        log(f"  🪞 wellness: mood={reading['mood']} fatigue={reading['fatigue']} "
+            f"— {reading['summary'][:100]}")
+
+
+DEFAULT_HANDLERS = {"deep_read": run_deep_read,
+                    "wellness_check": run_wellness_check}

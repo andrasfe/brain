@@ -90,6 +90,7 @@ class DaemonStats:
     visual_forward_model_trains: int = 0
     visual_replays: int = 0
     digests_written: int = 0
+    wellness_checks: int = 0
     screen_model_trains: int = 0
     vision_rules_learned: int = 0
     observations_pruned: int = 0
@@ -232,6 +233,22 @@ class BrainDaemon:
                 owner="deep_read", gate=self._worker_should_drain,
                 poll_seconds=1.0, idle_seconds=4.0,
                 log=lambda m: self.log(m))
+
+        # Wellness: occasional webcam self-check (how is the USER doing) —
+        # spool + enqueue only; the worker does the slow read. Needs the queue.
+        self.wellness = None
+        wl_cfg = cfg.raw.get("wellness") or {}
+        if wl_cfg.get("enabled") and self.job_queue is not None:
+            from brain.wellness import WellnessObserver
+            self.wellness = WellnessObserver(
+                cfg, self.job_queue,
+                interval_seconds=float(wl_cfg.get("interval_seconds", 1500)),
+                jitter_seconds=float(wl_cfg.get("jitter_seconds", 300)),
+                ttl_seconds=float(wl_cfg.get("ttl_seconds", 600)),
+                warmup_seconds=float(wl_cfg.get("camera_warmup_seconds", 1.2)),
+                device=str(wl_cfg.get("camera_device", "0")))
+            if not self.wellness.ok:
+                self.log(f"  ⚠ wellness refused: {self.wellness.reason}")
 
         self.observer = None
         if cap_cfg.get("enabled") and getattr(brain, "embodiment", None) is not None:
@@ -409,6 +426,16 @@ class BrainDaemon:
                         f"dist={res.get('content_dist')} {tail}")
             except Exception as e:
                 self.log(f"[daemon] observer error: {e}")
+
+        # ── wellness self-check (rate-limited inside; present-only) ────────
+        if self.wellness is not None:
+            try:
+                w = self.wellness.maybe_check(present=self._user_present)
+                if w.get("checked"):
+                    self.stats.wellness_checks += 1
+                    self.log("  📷 wellness check queued (webcam still spooled)")
+            except Exception as e:
+                self.log(f"[daemon] wellness error: {e}")
 
         # ── publish live status for the UI ─────────────────────────────────
         self._write_status()
