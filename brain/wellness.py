@@ -115,10 +115,14 @@ def shoot_webcam(dest: str, *, warmup_seconds: float = 3.0,
         # never triggers and ffmpeg runs until killed. -update keeps
         # overwriting dest, so the surviving frame is the last (warmed-up) one.
         frames = max(3, int(warmup_seconds * 30))
+        # Downscale in-capture: a 4K well-lit PNG is ~8MB — too heavy for the
+        # local endpoint (requests come back empty). 1280px is plenty for a
+        # face/posture read and keeps the payload ~1MB.
         r = subprocess.run(
             [ffmpeg, "-hide_banner", "-loglevel", "error",
              "-f", "avfoundation", "-framerate", "30", "-i", str(device),
-             "-frames:v", str(frames), "-update", "1", "-y", dest],
+             "-frames:v", str(frames), "-vf", "scale=1280:-2",
+             "-update", "1", "-y", dest],
             capture_output=True, timeout=25)
         return r.returncode == 0 and os.path.exists(dest)
     except Exception:
@@ -155,8 +159,10 @@ def analyze_wellness(llm, model: str, photo_path: str) -> Optional[dict]:
         out = None
         for _attempt in range(2):
             try:
+                # Reasoning models burn the default 400-token budget on CoT
+                # before emitting the JSON — give them headroom.
                 raw = llm.describe_image(model, build_wellness_instruction(),
-                                         photo_path)
+                                         photo_path, max_tokens=1500)
             except Exception:
                 raw = ""
             out = _extract_json_obj(raw)
