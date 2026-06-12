@@ -2169,6 +2169,35 @@ class WebUITests(unittest.TestCase):
         self.assertIn("MATCHED OBSERVATIONS", ctx)
         mem.close()
 
+    def test_task_history_roundtrip_and_log_tail(self):
+        from brain.webui import read_task_history, tail_log
+        tmp = Path(tempfile.mkdtemp())
+        th = tmp / "task_history.jsonl"
+        th.write_text('{"ts": 1.0, "task": "a", "answer": "x", "status": "done"}\n'
+                      'not json\n'
+                      '{"ts": 2.0, "task": "b", "answer": "", "status": "failed"}\n')
+        hist = read_task_history(th, 10)
+        self.assertEqual([h["task"] for h in hist], ["b", "a"])   # newest first
+        self.assertEqual(read_task_history(tmp / "nope.jsonl"), [])
+        lg = tmp / "d.log"
+        lg.write_text("one\n\ntwo\nthree\n")
+        self.assertEqual(tail_log(lg, 2), ["two", "three"])       # blanks dropped
+        self.assertEqual(tail_log(tmp / "nope.log"), [])
+
+    def test_daemon_appends_task_history(self):
+        from brain.daemon import BrainDaemon
+        tmp = Path(tempfile.mkdtemp())
+        d = MagicMock(spec=BrainDaemon)
+        d.cfg = MagicMock(); d.cfg.db_path = tmp / "m.sqlite"
+        BrainDaemon._append_task_history(d, "do the thing", "done it well")
+        BrainDaemon._append_task_history(d, "second", None)
+        from brain.webui import read_task_history
+        hist = read_task_history(tmp / "task_history.jsonl", 10)
+        self.assertEqual(hist[0]["task"], "second")
+        self.assertEqual(hist[0]["status"], "failed")
+        self.assertEqual(hist[1]["answer"], "done it well")
+        self.assertEqual(hist[1]["status"], "done")
+
     def test_ask_uses_llm(self):
         from brain.webui import ask
         mem, now = self._conn()

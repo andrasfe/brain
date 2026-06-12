@@ -152,6 +152,63 @@ def ask(conn, llm, model: str, question: str, days: float) -> str:
     return (out.get("answer") or "").strip() or "(no answer produced)"
 
 
+def read_task_history(path, k: int = 30) -> list[dict[str, Any]]:
+    """Tail of task_history.jsonl (newest first). Tolerant of bad lines."""
+    from pathlib import Path as _P
+    p = _P(path)
+    if not p.exists():
+        return []
+    out = []
+    for ln in p.read_text().splitlines()[-k:]:
+        try:
+            out.append(json.loads(ln))
+        except Exception:
+            continue
+    out.reverse()
+    return out
+
+
+def tail_log(path, n: int = 120) -> list[str]:
+    """Last n daemon.log lines, blank lines collapsed."""
+    from pathlib import Path as _P
+    p = _P(path)
+    if not p.exists():
+        return []
+    lines = [ln.rstrip() for ln in p.read_text(errors="replace").splitlines()]
+    return [ln for ln in lines if ln.strip()][-n:]
+
+
+def grab_screen_b64(max_width: int = 800) -> Optional[str]:
+    """One TRANSIENT screenshot for the live-view panel: capture → downscale →
+    base64 → delete. Never stored; served only to the local UI."""
+    import base64
+    import os
+    import shutil
+    import subprocess
+    import tempfile
+    sc = shutil.which("screencapture")
+    sips = shutil.which("sips")
+    if not sc:
+        return None
+    path = os.path.join(tempfile.mkdtemp(), "live.jpg")
+    try:
+        subprocess.run([sc, "-x", "-t", "jpg", path],
+                       capture_output=True, timeout=10)
+        if not os.path.exists(path):
+            return None
+        if sips:
+            subprocess.run([sips, "--resampleWidth", str(max_width), path],
+                           capture_output=True, timeout=10)
+        return base64.b64encode(open(path, "rb").read()).decode()
+    except Exception:
+        return None
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 # ── HTTP server ──────────────────────────────────────────────────────────────
 def serve(cfg, host: str = "127.0.0.1", port: int = 8800,
           webhook_url: str = "http://127.0.0.1:8765") -> None:
@@ -163,9 +220,13 @@ def serve(cfg, host: str = "127.0.0.1", port: int = 8800,
     from .llm import LLM
     from .status import gather_status
 
+    from pathlib import Path as _P
     llm = LLM(cfg)
     db_path = str(cfg.db_path)
     exec_model = cfg.models.get("executive", "")
+    base_dir = _P(cfg.db_path).parent
+    task_history_path = base_dir / "task_history.jsonl"
+    daemon_log_path = _P(__file__).resolve().parent.parent / "daemon.log"
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):  # silence access noise
@@ -204,9 +265,19 @@ def serve(cfg, host: str = "127.0.0.1", port: int = 8800,
                             "wellness": wellness_series(conn, since),
                             "activity": activity_summary(conn, since),
                             "journal": journal_entries(conn, 4),
+                            "tasks": read_task_history(task_history_path, 20),
                         })
                     finally:
                         conn.close()
+                elif path == "/api/logs":
+                    n = int(self._qs().get("n", 120))
+                    self._json({"lines": tail_log(daemon_log_path, n)})
+                elif path == "/api/screen":
+                    b64 = grab_screen_b64()
+                    if b64 is None:
+                        self._json({"error": "screencapture unavailable"}, 503)
+                    else:
+                        self._json({"jpg": b64})
                 else:
                     self._json({"error": "not found"}, 404)
             except Exception as e:  # noqa: BLE001
@@ -324,6 +395,22 @@ border:1px solid rgba(34,211,238,.2);font-size:13px;display:none;white-space:pre
 font-weight:600;padding:3px 10px;border-radius:8px;font-size:11px}
 .range button.on{color:var(--cy);border-color:rgba(34,211,238,.5)}
 .moodlbl{fill:#8b95a6;font-size:9px}
+.tasks .t{border-left:3px solid var(--mut);background:rgba(0,0,0,.22);
+border-radius:10px;padding:9px 12px;margin:8px 0}
+.tasks .t.done{border-color:var(--gr)}.tasks .t.failed{border-color:var(--rd)}
+.tasks .t.sent{border-color:var(--am)}
+.tasks .tt{font-size:13px;font-weight:600}
+.tasks .ta{font-size:12px;color:#aeb8c8;margin-top:4px;white-space:pre-wrap}
+.tasks .tm{font-size:10px;color:var(--mut);margin-top:3px;letter-spacing:.05em}
+.logpane{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;
+line-height:1.45;max-height:240px;overflow:auto;background:rgba(0,0,0,.35);
+border:1px solid var(--line);border-radius:10px;padding:10px;color:#9fb0c3;
+white-space:pre-wrap}
+.live img{width:100%;border-radius:10px;border:1px solid var(--line)}
+.hbtn{background:transparent;border:1px solid var(--line);color:var(--mut);
+font-size:11px;font-weight:600;padding:3px 10px;border-radius:8px}
+.cardhead{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.cardhead h2{margin:0}
 </style></head><body><div class="wrap">
 <header>
   <h1>🧠 brain</h1>
@@ -360,7 +447,16 @@ font-weight:600;padding:3px 10px;border-radius:8px;font-size:11px}
     <textarea id="task" rows="3" placeholder="e.g. observe whether anyone else uses this computer and note it in the journal"></textarea>
     <div class="row2"><button id="taskbtn">Send to brain</button><span class="sub" id="taskst"></span></div>
     <div class="note">Tasks enter the brain's input stream (channel=direct) and are processed
-    in its next waking cycle — watch daemon.log.</div></div>
+    in its next waking cycle.</div></div>
+  <div class="card w8 tasks"><div class="cardhead"><h2>Task history</h2></div>
+    <div id="tasks" class="sub">no tasks yet</div></div>
+  <div class="card w4 live"><div class="cardhead"><h2>Live view</h2>
+    <button class="hbtn" id="livebtn">start</button></div>
+    <img id="liveimg" style="display:none" alt="">
+    <div class="note">What the brain can see right now — transient frames, never stored.</div></div>
+  <div class="card w12"><div class="cardhead"><h2>Daemon log</h2>
+    <button class="hbtn" id="logclear">clear</button></div>
+    <div class="logpane" id="logs">…</div></div>
 </div></div>
 <script>
 let DAYS=7;
@@ -413,7 +509,17 @@ const last=wl[wl.length-1];
 $('lastwl').textContent=last?`latest (${fmt(last.ts)}): ${last.mood??''} — ${last.summary}`:'no self-checks in window yet';
 $('journal').innerHTML=(d.journal||[]).map(j=>{const m=j.content.match(/^Journal (\d{4}-\d{2}-\d{2}):\s*(.*)$/s);
 return `<p><span class="d">${m?m[1]:fmt(j.ts)}</span><br>${(m?m[2]:j.content).slice(0,360)}…</p>`}).join('')||'no entries yet';
+const hist=d.tasks||[];const histTexts=new Set(hist.map(t=>t.task));
+PENDING=PENDING.filter(p=>!histTexts.has(p.task));
+const cards=PENDING.map(p=>({...p,status:'sent'})).concat(hist);
+$('tasks').innerHTML=cards.map(t=>`<div class="t ${t.status}">
+<div class="tt">${esc(t.task).slice(0,180)}</div>
+${t.answer?`<div class="ta">${esc(t.answer).slice(0,500)}</div>`:''}
+<div class="tm">${t.ts?fmt(t.ts):''} · ${t.status==='sent'?'awaiting the brain…':t.status}</div></div>`).join('')
+||'<span class="sub">no tasks yet</span>';
 }catch(e){$('state').innerHTML='<span class="dot" style="background:var(--rd)"></span>ui error'}}
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let PENDING=[];
 document.querySelectorAll('.range button').forEach(b=>b.onclick=()=>{
 document.querySelectorAll('.range button').forEach(x=>x.classList.remove('on'));
 b.classList.add('on');DAYS=+b.dataset.d;refresh()});
@@ -431,9 +537,23 @@ $('taskbtn').disabled=true;$('taskst').textContent='sending…';
 try{const r=await fetch('/api/task',{method:'POST',headers:{'Content-Type':'application/json'},
 body:JSON.stringify({content:c})});const d=await r.json();
 $('taskst').textContent=d.sent?'✓ delivered to the brain':'✗ '+(d.detail||'failed');
-if(d.sent)$('task').value='';}catch(e){$('taskst').textContent='✗ '+e}
+if(d.sent){PENDING.unshift({task:c,ts:Date.now()/1000});$('task').value='';refresh();}}
+catch(e){$('taskst').textContent='✗ '+e}
 $('taskbtn').disabled=false};
-refresh();setInterval(refresh,10000);
+let LIVE=false,liveT=null;
+async function liveTick(){if(!LIVE)return;
+try{const r=await fetch('/api/screen');const d=await r.json();
+if(d.jpg){$('liveimg').src='data:image/jpeg;base64,'+d.jpg;$('liveimg').style.display='block'}}catch(e){}}
+$('livebtn').onclick=()=>{LIVE=!LIVE;$('livebtn').textContent=LIVE?'stop':'start';
+if(LIVE){liveTick();liveT=setInterval(liveTick,6000)}else{clearInterval(liveT);$('liveimg').style.display='none'}};
+let LOGCLEAR=0;
+async function logsTick(){try{const r=await fetch('/api/logs?n=160');const d=await r.json();
+const el=$('logs');const atBottom=el.scrollHeight-el.scrollTop-el.clientHeight<40;
+el.textContent=(d.lines||[]).slice(LOGCLEAR).join('\n')||'(empty)';
+if(atBottom)el.scrollTop=el.scrollHeight;}catch(e){}}
+$('logclear').onclick=async()=>{const r=await fetch('/api/logs?n=160');const d=await r.json();
+LOGCLEAR=(d.lines||[]).length;$('logs').textContent='(cleared)'}
+refresh();setInterval(refresh,10000);logsTick();setInterval(logsTick,5000);
 </script></body></html>
 """
 

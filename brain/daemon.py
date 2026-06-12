@@ -925,6 +925,7 @@ class BrainDaemon:
         affect_ref = self.affect
         self.brain._build_initial_affect = lambda: affect_ref  # type: ignore
         self._interactive_busy = True   # pause the deep-read worker (GPU)
+        answer = None
         try:
             answer = self.brain.run(task)
             if not quiet:
@@ -935,6 +936,24 @@ class BrainDaemon:
             self.brain._build_initial_affect = original
             self.brain.cfg.loop = original_loop
             self.brain.log = original_log
+            self._append_task_history(task, answer)
+
+    def _append_task_history(self, task: str, answer: Optional[str]) -> None:
+        """Task lifecycle visibility for the web UI: every processed task and
+        the brain's answer land in task_history.jsonl (capped tail)."""
+        import json as _json
+        path = Path(self.cfg.db_path).parent / "task_history.jsonl"
+        try:
+            rec = {"ts": time.time(), "task": task[:600],
+                   "answer": (answer or "")[:1200],
+                   "status": "done" if answer else "failed"}
+            lines = []
+            if path.exists():
+                lines = path.read_text().splitlines()[-199:]
+            lines.append(_json.dumps(rec, default=str))
+            path.write_text("\n".join(lines) + "\n")
+        except Exception:  # noqa: BLE001 — history must never break a run
+            pass
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
