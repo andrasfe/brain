@@ -52,3 +52,6 @@ init_git.command
 .dolt/
 *.db
 .beads-credential-key
+webui.log
+brain-webui.png
+.playwright-mcp/

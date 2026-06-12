@@ -2105,6 +2105,83 @@ class WellnessTests(unittest.TestCase):
         self.assertIsNone(choose_camera(""))
 
 
+class WebUITests(unittest.TestCase):
+    """Dashboard aggregates — wellness series, usage analytics, ask context."""
+
+    def _conn(self):
+        from brain.memory import Memory, OBSERVATION, SEMANTIC
+        from brain.embeddings import TfidfBackend
+        mem = Memory(Path(tempfile.mkdtemp()) / "m.sqlite", backend=TfidfBackend())
+        now = time.time()
+        rows = [
+            (3600, "[wellness] Looks alert; mood=focused; wearing: hoodie; fatigue=0.3; tension=0.1",
+             ["app:wellness", "agency:active"], OBSERVATION),
+            (1800, "[wellness] Drowsy; mood=tired; fatigue=0.8; tension=0.2",
+             ["app:wellness", "agency:active"], OBSERVATION),
+            (7200, "[Google Chrome] Reading a Reddit thread about MLX",
+             ["app:google chrome", "topic:mlx", "agency:active"], OBSERVATION),
+            (7100, "[Terminal] git push", ["app:terminal", "agency:active"], OBSERVATION),
+            (7000, "[Terminal] build script streaming logs",
+             ["app:terminal", "agency:passive"], OBSERVATION),
+            (900, "Journal 2026-06-09: You spent the day building.",
+             ["journal", "journal:2026-06-09"], SEMANTIC),
+        ]
+        for age, content, tags, mt in rows:
+            rid = mem.store(task="t", kind="k", content=content, mem_type=mt,
+                            tags=tags)
+            mem.conn.execute("UPDATE episodes SET ts=? WHERE id=?",
+                             (now - age, rid))
+        mem.conn.commit()
+        return mem, now
+
+    def test_wellness_series_parses_scores_and_mood(self):
+        from brain.webui import wellness_series
+        mem, now = self._conn()
+        s = wellness_series(mem.conn, now - 86400)
+        self.assertEqual(len(s), 2)
+        self.assertEqual(s[0]["mood"], "focused")
+        self.assertEqual(s[0]["fatigue"], 0.3)
+        self.assertEqual(s[1]["fatigue"], 0.8)   # chronological
+        mem.close()
+
+    def test_activity_summary_counts_and_excludes_wellness(self):
+        from brain.webui import activity_summary
+        mem, now = self._conn()
+        a = activity_summary(mem.conn, now - 86400, now=now)
+        self.assertEqual(a["active_obs"], 2)      # chrome + git push
+        self.assertEqual(a["passive_obs"], 1)     # build script
+        apps = {x["app"] for x in a["top_apps"]}
+        self.assertIn("terminal", apps)
+        self.assertNotIn("wellness", apps)
+        self.assertGreater(a["hours_active"], 0)
+        mem.close()
+
+    def test_journal_entries_and_ask_context(self):
+        from brain.webui import journal_entries, build_ask_context
+        mem, now = self._conn()
+        j = journal_entries(mem.conn, 5)
+        self.assertEqual(len(j), 1)
+        self.assertIn("building", j[0]["content"])
+        ctx = build_ask_context(mem.conn, "which app did I use most?", 1.0,
+                                now=now)
+        self.assertIn("top apps by observations", ctx)
+        self.assertIn("terminal", ctx)
+        self.assertIn("MATCHED OBSERVATIONS", ctx)
+        mem.close()
+
+    def test_ask_uses_llm(self):
+        from brain.webui import ask
+        mem, now = self._conn()
+        llm = MagicMock()
+        llm.chat_json.return_value = {"answer": "You used Terminal the most (2 of 3)."}
+        out = ask(mem.conn, llm, "exec", "which app did I use most?", 1.0)
+        self.assertIn("Terminal", out)
+        # the prompt carried real aggregates
+        prompt = llm.chat_json.call_args[0][2]
+        self.assertIn("USAGE STATS", prompt)
+        mem.close()
+
+
 class JobQueueTests(unittest.TestCase):
     """Durable SQLite job queue — priority, lease, dedup, TTL, retry."""
 

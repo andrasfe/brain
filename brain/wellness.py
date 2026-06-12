@@ -215,6 +215,8 @@ def record_wellness(memory, reading: dict) -> str:
     """Persist a reading as a wellness observation (Recall + journal pick it
     up like any other observation; mood becomes a tag)."""
     bits = [reading["summary"]]
+    if reading.get("mood"):
+        bits.append(f"mood={reading['mood']}")
     if reading.get("attire"):
         bits.append(f"wearing: {reading['attire']}")
     if reading.get("notable"):
