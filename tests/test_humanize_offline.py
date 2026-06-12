@@ -2055,6 +2055,25 @@ class WellnessTests(unittest.TestCase):
         self.assertIn("Do NOT identify", p)
         self.assertIn("other", p.lower())
 
+    def test_choose_camera_prefers_webcam_over_capture_card(self):
+        from brain.wellness import choose_camera
+        listing = (
+            "[AVFoundation indev @ 0x1] AVFoundation video devices:\n"
+            "[AVFoundation indev @ 0x1] [0] Guermok USB3 Video\n"
+            "[AVFoundation indev @ 0x1] [1] EMEET SmartCam C960 4K\n"
+            "[AVFoundation indev @ 0x1] [2] iPhone (481) Camera\n"
+            "[AVFoundation indev @ 0x1] [3] iPhone (481) Desk View Camera\n"
+            "[AVFoundation indev @ 0x1] [4] Capture screen 0\n"
+            "[AVFoundation indev @ 0x1] AVFoundation audio devices:\n"
+            "[AVFoundation indev @ 0x1] [0] EMEET SmartCam C960 4K\n")
+        self.assertEqual(choose_camera(listing), "1")     # the real webcam
+        facetime = ("video devices:\n[0] FaceTime HD Camera\n"
+                    "[1] Capture screen 0\naudio devices:\n")
+        self.assertEqual(choose_camera(facetime), "0")
+        self.assertIsNone(choose_camera("video devices:\n[0] Capture screen 0\n"
+                                        "audio devices:\n"))
+        self.assertIsNone(choose_camera(""))
+
 
 class JobQueueTests(unittest.TestCase):
     """Durable SQLite job queue — priority, lease, dedup, TTL, retry."""

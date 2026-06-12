@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import os
 import random
+import re
 import shutil
 import subprocess
 import time
@@ -34,8 +35,62 @@ from typing import Any, Optional
 from .observer import clean_vision_text, privacy_ok, store_screen_observation
 
 
+def choose_camera(listing: str) -> Optional[str]:
+    """Pick the most webcam-looking device index from an avfoundation device
+    listing. Capture cards ('Guermok USB3 Video'), screen-capture pseudo-
+    devices, and Desk View are poor choices — a dongle with no signal makes
+    ffmpeg hang forever. Prefer built-in / FaceTime / *cam* devices. Pure +
+    testable."""
+    devices: list[tuple[str, str]] = []
+    in_video = False
+    for line in (listing or "").splitlines():
+        if "video devices" in line.lower():
+            in_video = True
+            continue
+        if "audio devices" in line.lower():
+            break
+        if in_video:
+            m = re.search(r"\[(\d+)\]\s+(.+)$", line)
+            if m:
+                devices.append((m.group(1), m.group(2).strip()))
+    best: Optional[str] = None
+    best_score = -1
+    for idx, name in devices:
+        n = name.lower()
+        if "capture screen" in n:
+            continue
+        if "facetime" in n or "built-in" in n:
+            score = 100
+        elif "desk view" in n:
+            score = 1
+        elif "iphone" in n:
+            score = 5            # continuity camera: works but flaky/absent
+        elif "cam" in n:         # webcam / SmartCam / camera
+            score = 80
+        else:
+            score = 10           # unknown video device (could be a dead dongle)
+        if score > best_score:
+            best_score, best = score, idx
+    return best
+
+
+def detect_camera_device() -> Optional[str]:
+    """choose_camera() over the live avfoundation listing."""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return None
+    try:
+        r = subprocess.run(
+            [ffmpeg, "-hide_banner", "-f", "avfoundation",
+             "-list_devices", "true", "-i", ""],
+            capture_output=True, text=True, timeout=15)
+        return choose_camera((r.stderr or "") + (r.stdout or ""))
+    except Exception:
+        return None
+
+
 def shoot_webcam(dest: str, *, warmup_seconds: float = 1.2,
-                 device: str = "0") -> bool:
+                 device: str = "auto") -> bool:
     """One webcam still via imagesnap (if installed) or ffmpeg/avfoundation.
     The short warmup avoids the dark first frames. Returns success."""
     imagesnap = shutil.which("imagesnap")
@@ -48,9 +103,13 @@ def shoot_webcam(dest: str, *, warmup_seconds: float = 1.2,
         ffmpeg = shutil.which("ffmpeg")
         if not ffmpeg:
             return False
+        if device in ("auto", "", None):
+            device = detect_camera_device()
+            if device is None:
+                return False
         r = subprocess.run(
             [ffmpeg, "-hide_banner", "-loglevel", "error",
-             "-f", "avfoundation", "-framerate", "30", "-i", device,
+             "-f", "avfoundation", "-framerate", "30", "-i", str(device),
              "-t", str(warmup_seconds), "-update", "1", "-y", dest],
             capture_output=True, timeout=25)
         return r.returncode == 0 and os.path.exists(dest)
@@ -141,7 +200,7 @@ class WellnessObserver:
 
     def __init__(self, cfg, job_queue, *, interval_seconds: float = 1500.0,
                  jitter_seconds: float = 300.0, ttl_seconds: float = 600.0,
-                 warmup_seconds: float = 1.2, device: str = "0",
+                 warmup_seconds: float = 1.2, device: str = "auto",
                  time_fn=time.monotonic, shoot_fn=shoot_webcam,
                  rng: Optional[random.Random] = None):
         self.cfg = cfg

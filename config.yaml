@@ -212,4 +212,5 @@ wellness:
   jitter_seconds: 300         # randomize so it isn't metronomic
   ttl_seconds: 600            # a stale face reading is worthless — drop it
   camera_warmup_seconds: 1.2  # skip the dark first frames
-  camera_device: "0"          # avfoundation device index (default camera)
+  camera_device: "auto"       # auto-picks the most webcam-like device (skips
+                              # capture cards / screen devices); or an index

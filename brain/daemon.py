@@ -246,7 +246,7 @@ class BrainDaemon:
                 jitter_seconds=float(wl_cfg.get("jitter_seconds", 300)),
                 ttl_seconds=float(wl_cfg.get("ttl_seconds", 600)),
                 warmup_seconds=float(wl_cfg.get("camera_warmup_seconds", 1.2)),
-                device=str(wl_cfg.get("camera_device", "0")))
+                device=str(wl_cfg.get("camera_device", "auto")))
             if not self.wellness.ok:
                 self.log(f"  ⚠ wellness refused: {self.wellness.reason}")
 
