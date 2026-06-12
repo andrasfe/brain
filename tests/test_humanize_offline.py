@@ -2026,6 +2026,35 @@ class WellnessTests(unittest.TestCase):
         llm.describe_image.return_value = '{"person_visible": false}'
         self.assertIsNone(analyze_wellness(llm, "smart", "/tmp/x.png"))
 
+    def test_attire_and_notable_flow_through(self):
+        from brain.wellness import analyze_wellness, record_wellness
+        from brain.memory import Memory, OBSERVATION
+        from brain.embeddings import TfidfBackend
+        llm = MagicMock(spec=["describe_image"])
+        llm.describe_image.return_value = (
+            '{"person_visible": true, "fatigue": 0.3, "tension": 0.1, '
+            '"mood": "relaxed", "attire": "grey hoodie, glasses", '
+            '"notable": "a cat is sitting on the desk", '
+            '"summary": "Looks relaxed and alert."}')
+        r = analyze_wellness(llm, "smart", "/tmp/x.png")
+        self.assertEqual(r["attire"], "grey hoodie, glasses")
+        self.assertIn("cat", r["notable"])
+        mem = Memory(Path(tempfile.mkdtemp()) / "m.sqlite", backend=TfidfBackend())
+        record_wellness(mem, r)
+        row = mem.conn.execute(
+            "SELECT content FROM episodes WHERE mem_type=?", (OBSERVATION,)).fetchone()
+        self.assertIn("wearing: grey hoodie", row["content"])
+        self.assertIn("notable: a cat", row["content"])
+        mem.close()
+        # template-echo placeholders are scrubbed
+        llm.describe_image.return_value = (
+            '{"person_visible": true, "fatigue": 0.3, "tension": 0.1, '
+            '"mood": "calm", "attire": "<brief, e.g. grey hoodie>", '
+            '"notable": "", "summary": "Looks calm and steady today."}')
+        r2 = analyze_wellness(llm, "smart", "/tmp/x.png")
+        self.assertEqual(r2["attire"], "")
+        self.assertEqual(r2["notable"], "")
+
     def test_handler_records_and_drops_pixels(self):
         from brain.workers import run_wellness_check
         from brain.memory import Memory, OBSERVATION

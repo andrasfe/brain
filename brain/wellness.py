@@ -132,15 +132,20 @@ def shoot_webcam(dest: str, *, warmup_seconds: float = 3.0,
 def build_wellness_instruction() -> str:
     return (
         "This is a webcam photo of the computer's user, taken with their "
-        "consent for a private self-check.\n"
-        "Assess ONLY their visible state: alertness vs fatigue (eyes, eyelids, "
+        "consent for a private self-check and journal.\n"
+        "Assess their visible state: alertness vs fatigue (eyes, eyelids, "
         "posture), apparent focus vs distraction, tension, and overall mood. "
-        "Do NOT identify anyone, do NOT describe the room, background, other "
-        "people, or clothing.\n"
+        "Also note WHAT THEY ARE WEARING (brief: garment + color, glasses, "
+        "headphones) and anything INTERESTING or CURIOUS in view — an unusual "
+        "object, a pet, a coffee mug, a change from the ordinary. "
+        "Do NOT identify anyone by name and do NOT describe other people who "
+        "may be visible.\n"
         "Return JSON exactly with these keys: "
         '{"person_visible": true|false, '
         '"fatigue": <0.0-1.0>, "tension": <0.0-1.0>, '
         '"mood": "<one word, e.g. focused|relaxed|tired|stressed|neutral>", '
+        '"attire": "<brief, e.g. grey hoodie, glasses, over-ear headphones>", '
+        '"notable": "<one short clause about anything curious, or empty>", '
         '"summary": "<one sentence about how they look right now>"}'
     )
 
@@ -180,9 +185,15 @@ def analyze_wellness(llm, model: str, photo_path: str) -> Optional[dict]:
             return round(max(0.0, min(1.0, float(v))), 2)
         except (TypeError, ValueError):
             return None
+    def _clean(key, cap):
+        v = str(out.get(key) or "").strip()
+        # the model sometimes echoes the template placeholder
+        return "" if (not v or v.startswith("<")) else v[:cap]
     return {"fatigue": _clamp(out.get("fatigue")),
             "tension": _clamp(out.get("tension")),
             "mood": str(out.get("mood") or "neutral").strip().lower()[:24],
+            "attire": _clean("attire", 120),
+            "notable": _clean("notable", 160),
             "summary": summary[:240]}
 
 
@@ -204,6 +215,10 @@ def record_wellness(memory, reading: dict) -> str:
     """Persist a reading as a wellness observation (Recall + journal pick it
     up like any other observation; mood becomes a tag)."""
     bits = [reading["summary"]]
+    if reading.get("attire"):
+        bits.append(f"wearing: {reading['attire']}")
+    if reading.get("notable"):
+        bits.append(f"notable: {reading['notable']}")
     if reading.get("fatigue") is not None:
         bits.append(f"fatigue={reading['fatigue']}")
     if reading.get("tension") is not None:
@@ -303,6 +318,10 @@ def main() -> int:
         record_wellness(memory, reading)
         print(f"\nmood={reading['mood']}  fatigue={reading['fatigue']}  "
               f"tension={reading['tension']}\n{reading['summary']}")
+        if reading.get("attire"):
+            print(f"wearing: {reading['attire']}")
+        if reading.get("notable"):
+            print(f"notable: {reading['notable']}")
         print("\n(recorded; pixels deleted)")
     finally:
         try:
