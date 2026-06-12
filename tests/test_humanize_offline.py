@@ -13,6 +13,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -1804,6 +1805,151 @@ class EmbodimentIntegrationTests(unittest.TestCase):
             self.assertIsNone(brain.embodiment)
             self.assertIsNone(brain.occipital)
             brain.close()
+
+
+class RecallTests(unittest.TestCase):
+    """Recall — query your own activity (search + synthesis, no network)."""
+
+    def _mem_with_obs(self):
+        from brain.memory import Memory, OBSERVATION
+        from brain.embeddings import TfidfBackend
+        mem = Memory(Path(tempfile.mkdtemp()) / "m.sqlite", backend=TfidfBackend())
+        now = time.time()
+        rows = [
+            # (age_s, content, tags)
+            (3600, "[Google Chrome] Reading a Reddit thread about Opus guardrail testing",
+             ["app:google chrome", "topic:opus", "topic:guardrail", "agency:active"]),
+            (7200, "[Terminal] Running git push for the brain repository",
+             ["app:terminal", "topic:brain", "agency:active"]),
+            (10800, "[Terminal] A build script streaming logs unattended",
+             ["app:terminal", "agency:passive"]),
+            (10 * 86400, "[Slack] Old conversation about lunch plans",
+             ["app:slack", "topic:lunch", "agency:active"]),
+        ]
+        for age, content, tags in rows:
+            rid = mem.store(task="screen_observation", kind="activity",
+                            content=content, salience=0.5,
+                            mem_type=OBSERVATION, tags=tags)
+            mem.conn.execute("UPDATE episodes SET ts=? WHERE id=?",
+                             (now - age, rid))
+        mem.conn.commit()
+        return mem, now
+
+    def test_search_matches_topic_and_filters_time(self):
+        from brain.recall import search_observations
+        mem, now = self._mem_with_obs()
+        hits = search_observations(mem, "guardrail reddit thread",
+                                   since_ts=now - 7 * 86400, now=now)
+        self.assertTrue(hits)
+        self.assertIn("guardrail", hits[0]["content"].lower())
+        # the 10-day-old Slack row is outside the window even for 'lunch'
+        self.assertFalse(search_observations(mem, "lunch",
+                                             since_ts=now - 7 * 86400, now=now))
+        mem.close()
+
+    def test_search_filters_app_and_agency(self):
+        from brain.recall import search_observations
+        mem, now = self._mem_with_obs()
+        term = search_observations(mem, "", app="terminal", now=now)
+        self.assertEqual(len(term), 2)
+        passive = search_observations(mem, "", agency="passive", now=now)
+        self.assertEqual(len(passive), 1)
+        self.assertIn("unattended", passive[0]["content"])
+        mem.close()
+
+    def test_browse_mode_newest_first(self):
+        from brain.recall import search_observations
+        mem, now = self._mem_with_obs()
+        hits = search_observations(mem, "", now=now)
+        self.assertEqual([h["ts"] for h in hits],
+                         sorted([h["ts"] for h in hits], reverse=True))
+        mem.close()
+
+    def test_synthesize_uses_llm_and_handles_empty(self):
+        from brain.recall import synthesize
+        llm = MagicMock()
+        llm.chat_json.return_value = {"answer": "You read about guardrails at 14:02."}
+        out = synthesize(llm, "exec", "what did I read?",
+                         [{"ts": time.time(), "content": "x", "tags": ""}])
+        self.assertIn("guardrails", out)
+        self.assertEqual(synthesize(llm, "exec", "q", []),
+                         "I have no matching observations for that.")
+
+
+class JournalistTests(unittest.TestCase):
+    """Nightly digest — completed days, idempotent, memory + markdown."""
+
+    def _mem_with_yesterday(self, n=12):
+        from brain.memory import Memory, OBSERVATION
+        from brain.embeddings import TfidfBackend
+        from brain.sleep.journalist import _day_bounds, _date_of
+        mem = Memory(Path(tempfile.mkdtemp()) / "m.sqlite", backend=TfidfBackend())
+        date_str = _date_of(time.time() - 86400.0)
+        lo, hi = _day_bounds(date_str)
+        for i in range(n):
+            rid = mem.store(task="screen_observation", kind="activity",
+                            content=f"[Chrome] Reading about topic {i}",
+                            salience=0.5, mem_type="observation",
+                            tags=["app:chrome", f"topic:t{i % 3}",
+                                  "agency:active" if i % 4 else "agency:passive"])
+            mem.conn.execute("UPDATE episodes SET ts=? WHERE id=?",
+                             (lo + 3600 + i * 600, rid))
+        mem.conn.commit()
+        return mem, date_str
+
+    def test_digest_writes_memory_and_markdown_once(self):
+        from brain.sleep import Journalist
+        mem, date_str = self._mem_with_yesterday()
+        jd = Path(tempfile.mkdtemp()) / "journal"
+        j = Journalist(journal_dir=jd)
+        llm = MagicMock()
+        llm.chat_json.return_value = {
+            "digest": "You spent the day reading about t0 in Chrome, with a "
+                      "couple of unattended runs in the afternoon."}
+        out = j.run(mem, llm, "exec", log=lambda _m: None)
+        self.assertTrue(out["written"])
+        self.assertEqual(out["date"], date_str)
+        self.assertTrue((jd / f"{date_str}.md").exists())
+        body = (jd / f"{date_str}.md").read_text()
+        self.assertIn("You spent the day", body)
+        # stored as semantic memory, tagged
+        row = mem.conn.execute(
+            "SELECT * FROM episodes WHERE tags LIKE ?",
+            (f"%journal:{date_str}%",)).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["mem_type"], "semantic")
+        # idempotent: second run no-ops, no extra LLM call
+        n_calls = llm.chat_json.call_count
+        out2 = j.run(mem, llm, "exec")
+        self.assertFalse(out2["written"])
+        self.assertEqual(llm.chat_json.call_count, n_calls)
+        mem.close()
+
+    def test_skips_today_and_thin_days(self):
+        from brain.memory import Memory
+        from brain.embeddings import TfidfBackend
+        from brain.sleep import Journalist
+        # observations only TODAY → nothing to digest (completed days only)
+        mem = Memory(Path(tempfile.mkdtemp()) / "m.sqlite", backend=TfidfBackend())
+        for i in range(10):
+            mem.store(task="screen_observation", kind="activity",
+                      content=f"now {i}", mem_type="observation",
+                      tags=["app:x"])
+        j = Journalist(journal_dir=None)
+        out = j.run(mem, MagicMock(), "exec")
+        self.assertFalse(out["written"])
+        mem.close()
+
+    def test_aggregate_stats(self):
+        from brain.sleep import Journalist
+        mem, date_str = self._mem_with_yesterday(12)
+        rows = mem.conn.execute(
+            "SELECT ts, content, tags, salience FROM episodes ORDER BY ts").fetchall()
+        stats = Journalist._aggregate(rows)
+        self.assertEqual(stats["n"], 12)
+        self.assertIn("chrome", stats["top_apps"])
+        self.assertTrue(0 < stats["pct_active"] < 100)
+        mem.close()
 
 
 class JobQueueTests(unittest.TestCase):

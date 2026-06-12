@@ -117,6 +117,16 @@ python3 -m brain.sleep.visual_forward_model_trainer --epochs 200 --min-rows 40
 python3 -m brain.sleep.sequence_trainer    # (via daemon NREM) next-screen predictor
 python3 -m brain.embodiment_selftest        # prove eyes+hands safely (mouse-move only)
 
+# RECALL — ask the brain about your own activity (the exocortex payoff)
+python3 -m brain.recall "what was that Reddit thread about guardrails?"
+python3 -m brain.recall --days 1 "what did I work on today?"
+python3 -m brain.recall --app slack --agency passive --no-llm ""   # raw browse
+
+# nightly journal — digest of a completed day (runs automatically during NREM)
+python3 -m brain.sleep.journalist                    # most recent undigested day
+python3 -m brain.sleep.journalist --date today --force   # partial-day, manual
+# entries land in ~/brain/journal/YYYY-MM-DD.md (local, git-ignored)
+
 # brain status — snapshot, JSON, or an auto-refreshing web dashboard
 python3 -m brain.status                 # terminal snapshot
 python3 -m brain.status --json          # raw JSON
@@ -354,6 +364,22 @@ either recovers ("Forget the cat; …") or drifts.
   screen to see), which is exactly when heavy NREM/REM work runs; when you
   return it wakes. `presence_sleep` makes this the dominant trigger over the
   affect/clock model while capture is enabled.
+
+- **`brain/recall.py`** — RECALL, the user-facing payoff: ask the brain about
+  your own activity (`python -m brain.recall "…"`). Search is self-contained
+  (keyword/topic overlap × salience + recency boost, with app / agency / time
+  filters) — deliberately NOT `retrieve_semantic`, because observation rows
+  cache DINOv2 *image* vectors in `embedding`, a different space from any text
+  query. Synthesis is one executive-model pass over the timestamped matches
+  (chat_json, so reasoning models can't leak CoT). Local, read-only.
+
+- **`brain/sleep/journalist.py`** — the nightly digest (NREM). Aggregates a
+  COMPLETED day's observations (apps, topics, active vs passive %, span),
+  samples the stream into a budgeted prompt, and writes a 4-8 sentence journal
+  entry: stored as `mem_type=semantic` with `journal:YYYY-MM-DD` tag (so Recall
+  answers "what did I do Tuesday?") and appended to `~/brain/journal/DATE.md`
+  (git-ignored). Idempotent per day; at most one digest (one executive call)
+  per NREM bout; guards against degenerate/template-echo outputs.
 
 - **`brain/status.py`** — status snapshot + UI. `gather_status(cfg)` reads the
   daemon's `status.json` (live wake/sleep state + affect, written each tick by

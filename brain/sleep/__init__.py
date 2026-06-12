@@ -8,6 +8,7 @@ from .forgetter import Forgetter
 from .forward_model_trainer import ForwardModelTrainer
 from .visual_forward_model_trainer import VisualForwardModelTrainer
 from .visual_replay import VisualReplay
+from .journalist import Journalist
 from .mood_regulator import MoodRegulator
 from .purger import ScreenPurger
 from .scheduler import Scheduler
@@ -16,6 +17,7 @@ from .skill_pruner import SkillPruner
 from .vision_teacher import VisionTeacher
 
 __all__ = ["Dreamer", "Forgetter", "ForwardModelTrainer",
-           "VisualForwardModelTrainer", "VisualReplay", "MoodRegulator",
+           "VisualForwardModelTrainer", "VisualReplay", "Journalist",
+           "MoodRegulator",
            "ScreenPurger", "Scheduler", "ScreenSequenceTrainer", "SkillPruner",
            "VisionTeacher"]

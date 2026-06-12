@@ -33,6 +33,10 @@ screen_model.npz
 screen_model.json
 screen_model.mlx.safetensors
 screen_reading_learned.txt
+jobs.sqlite
+jobs.sqlite-shm
+jobs.sqlite-wal
+journal/
 
 # one-off helper launcher (not part of the project)
 init_git.command

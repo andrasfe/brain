@@ -60,7 +60,7 @@ from brain.workers import Worker, DEFAULT_HANDLERS  # noqa: E402
 from brain.presence import idle_seconds  # noqa: E402
 from brain.sleep import (  # noqa: E402
     Dreamer, Forgetter, ForwardModelTrainer, VisualForwardModelTrainer,
-    VisualReplay, MoodRegulator, ScreenPurger,
+    VisualReplay, Journalist, MoodRegulator, ScreenPurger,
     Scheduler, ScreenSequenceTrainer, SkillPruner, VisionTeacher,
 )
 from brain.status import write_status  # noqa: E402
@@ -89,6 +89,7 @@ class DaemonStats:
     forward_model_trains: int = 0
     visual_forward_model_trains: int = 0
     visual_replays: int = 0
+    digests_written: int = 0
     screen_model_trains: int = 0
     vision_rules_learned: int = 0
     observations_pruned: int = 0
@@ -173,6 +174,10 @@ class BrainDaemon:
         # train the visual policy. Runs after the visual trainer each NREM bout.
         self.visual_replay = VisualReplay(
             min_rows=int(fm_cfg.get("min_rows", 40)))
+        # Journalist: nightly digest of the day's activity (Recall's payoff).
+        # At most one digest (one executive call) per NREM bout; idempotent.
+        self.journalist = Journalist(
+            journal_dir=Path(cfg.db_path).parent / "journal")
         # Teacher-student: the executive model curates the student's
         # screen-reading skill during sleep. Only when capture is on.
         self.vision_teacher = (
@@ -650,6 +655,17 @@ class BrainDaemon:
                 self.stats.visual_replays += int(vr.get("n", 0) or 0)
             except Exception as e:
                 self.log(f"  ⚠ visual_replay failed: {type(e).__name__}: {e}")
+            # journalist: digest the most recent undigested completed day into
+            # a journal entry (semantic memory + markdown). One LLM call max.
+            try:
+                jr = self.journalist.run(
+                    self.brain.memory, self.brain.llm,
+                    self.cfg.models.get("executive", ""),
+                    log=lambda m: self.log(f"  {m}"))
+                if jr.get("written"):
+                    self.stats.digests_written += 1
+            except Exception as e:
+                self.log(f"  ⚠ journalist failed: {type(e).__name__}: {e}")
             # screen-sequence trainer: learn the dynamics of the user's day
             # (next-screen prediction) from the observation stream; refresh the
             # live occipital model.
