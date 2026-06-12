@@ -55,7 +55,7 @@ def choose_camera(listing: str) -> Optional[str]:
                 devices.append((m.group(1), m.group(2).strip()))
     best: Optional[str] = None
     best_score = -1
-    for idx, name in devices:
+    for _idx, name in devices:
         n = name.lower()
         if "capture screen" in n:
             continue
@@ -70,7 +70,10 @@ def choose_camera(listing: str) -> Optional[str]:
         else:
             score = 10           # unknown video device (could be a dead dongle)
         if score > best_score:
-            best_score, best = score, idx
+            # Return the NAME, not the index: avfoundation indices shift as
+            # iPhone continuity cameras appear/disappear, and a stale index can
+            # land on a screen-capture device (we observed exactly that).
+            best_score, best = score, name
     return best
 
 
@@ -89,7 +92,7 @@ def detect_camera_device() -> Optional[str]:
         return None
 
 
-def shoot_webcam(dest: str, *, warmup_seconds: float = 1.2,
+def shoot_webcam(dest: str, *, warmup_seconds: float = 3.0,
                  device: str = "auto") -> bool:
     """One webcam still via imagesnap (if installed) or ffmpeg/avfoundation.
     The short warmup avoids the dark first frames. Returns success."""
@@ -107,10 +110,15 @@ def shoot_webcam(dest: str, *, warmup_seconds: float = 1.2,
             device = detect_camera_device()
             if device is None:
                 return False
+        # Stop by FRAME COUNT, not duration: some webcams (e.g. EMEET) report a
+        # bogus timebase ("not enough frames to estimate rate"), so a -t stop
+        # never triggers and ffmpeg runs until killed. -update keeps
+        # overwriting dest, so the surviving frame is the last (warmed-up) one.
+        frames = max(3, int(warmup_seconds * 30))
         r = subprocess.run(
             [ffmpeg, "-hide_banner", "-loglevel", "error",
              "-f", "avfoundation", "-framerate", "30", "-i", str(device),
-             "-t", str(warmup_seconds), "-update", "1", "-y", dest],
+             "-frames:v", str(frames), "-update", "1", "-y", dest],
             capture_output=True, timeout=25)
         return r.returncode == 0 and os.path.exists(dest)
     except Exception:
@@ -142,13 +150,18 @@ def analyze_wellness(llm, model: str, photo_path: str) -> Optional[dict]:
     except Exception:
         out = None
     if out is None:
-        # describe_image returns prose; parse the JSON out of it.
-        try:
-            raw = llm.describe_image(model, build_wellness_instruction(),
-                                     photo_path)
-        except Exception:
-            return None
-        out = _extract_json_obj(raw)
+        # describe_image returns prose; parse the JSON out of it. Retry once:
+        # LM Studio transiently 400s with "Model unloaded" while it JIT-reloads.
+        out = None
+        for _attempt in range(2):
+            try:
+                raw = llm.describe_image(model, build_wellness_instruction(),
+                                         photo_path)
+            except Exception:
+                raw = ""
+            out = _extract_json_obj(raw)
+            if out is not None:
+                break
     if not isinstance(out, dict):
         return None
     if not out.get("person_visible", True):
@@ -200,7 +213,7 @@ class WellnessObserver:
 
     def __init__(self, cfg, job_queue, *, interval_seconds: float = 1500.0,
                  jitter_seconds: float = 300.0, ttl_seconds: float = 600.0,
-                 warmup_seconds: float = 1.2, device: str = "auto",
+                 warmup_seconds: float = 3.0, device: str = "auto",
                  time_fn=time.monotonic, shoot_fn=shoot_webcam,
                  rng: Optional[random.Random] = None):
         self.cfg = cfg

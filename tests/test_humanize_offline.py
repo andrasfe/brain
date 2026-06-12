@@ -2066,10 +2066,11 @@ class WellnessTests(unittest.TestCase):
             "[AVFoundation indev @ 0x1] [4] Capture screen 0\n"
             "[AVFoundation indev @ 0x1] AVFoundation audio devices:\n"
             "[AVFoundation indev @ 0x1] [0] EMEET SmartCam C960 4K\n")
-        self.assertEqual(choose_camera(listing), "1")     # the real webcam
+        # returns the NAME (indices shift as iPhone cameras come and go)
+        self.assertEqual(choose_camera(listing), "EMEET SmartCam C960 4K")
         facetime = ("video devices:\n[0] FaceTime HD Camera\n"
                     "[1] Capture screen 0\naudio devices:\n")
-        self.assertEqual(choose_camera(facetime), "0")
+        self.assertEqual(choose_camera(facetime), "FaceTime HD Camera")
         self.assertIsNone(choose_camera("video devices:\n[0] Capture screen 0\n"
                                         "audio devices:\n"))
         self.assertIsNone(choose_camera(""))
