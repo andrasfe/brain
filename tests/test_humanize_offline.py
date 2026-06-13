@@ -2348,30 +2348,32 @@ class JoplinPublishTests(unittest.TestCase):
 
     def test_upsert_creates_then_updates_by_marker(self):
         http = MagicMock()
-        # first upsert: search finds nothing → POST create
-        http.get.return_value = self._Resp({"items": []})
+        # first upsert: folder scan finds nothing → POST create
+        http.get.return_value = self._Resp({"items": [], "has_more": False})
         http.post.return_value = self._Resp({"id": "N1"})
         c = self._client_with(http)
         nid = c.upsert_note("NB1", "Brain — 2026-06-12", "body", "daily:2026-06-12")
         self.assertEqual(nid, "N1")
-        # the created body carried the marker
         self.assertIn("<!-- brain:daily:2026-06-12 -->",
                       http.post.call_args.kwargs["json"]["body"])
-        # second upsert: search now returns the marked note → PUT update
+        # second upsert: folder now contains the marked note → PUT update
         http.get.return_value = self._Resp(
-            {"items": [{"id": "N1", "body": "<!-- brain:daily:2026-06-12 -->\nx"}]})
+            {"items": [{"id": "N1", "body": "<!-- brain:daily:2026-06-12 -->\nx"}],
+             "has_more": False})
         http.put.return_value = self._Resp({"id": "N1"})
         nid2 = c.upsert_note("NB1", "Brain — 2026-06-12", "newbody",
                              "daily:2026-06-12")
         self.assertEqual(nid2, "N1")
         http.put.assert_called_once()
 
-    def test_find_note_rejects_fuzzy_nonmatch(self):
+    def test_find_in_folder_rejects_fuzzy_nonmatch(self):
         http = MagicMock()
-        # search returns a note whose marker is a DIFFERENT key
+        # folder note carries a DIFFERENT key → no match (no duplicate guard miss)
         http.get.return_value = self._Resp(
-            {"items": [{"id": "X", "body": "<!-- brain:daily:2099-01-01 -->"}]})
-        self.assertIsNone(self._client_with(http).find_note_by_marker("daily:2026-06-12"))
+            {"items": [{"id": "X", "body": "<!-- brain:daily:2099-01-01 -->"}],
+             "has_more": False})
+        self.assertIsNone(
+            self._client_with(http).find_note_in_folder("NB1", "daily:2026-06-12"))
 
     def test_build_daily_markdown(self):
         from brain.publish import build_daily_markdown
@@ -2442,6 +2444,8 @@ class WebUITests(unittest.TestCase):
             (7100, "[Terminal] git push", ["app:terminal", "agency:active"], OBSERVATION),
             (7000, "[Terminal] build script streaming logs",
              ["app:terminal", "agency:passive"], OBSERVATION),
+            (6000, "[survey] Chrome[1]: Reddit · Code[1]: paper.tex",
+             ["app:survey", "agency:passive"], OBSERVATION),
             (900, "Journal 2026-06-09: You spent the day building.",
              ["journal", "journal:2026-06-09"], SEMANTIC),
         ]
@@ -2468,10 +2472,11 @@ class WebUITests(unittest.TestCase):
         mem, now = self._conn()
         a = activity_summary(mem.conn, now - 86400, now=now)
         self.assertEqual(a["active_obs"], 2)      # chrome + git push
-        self.assertEqual(a["passive_obs"], 1)     # build script
+        self.assertEqual(a["passive_obs"], 1)     # build script (survey excluded)
         apps = {x["app"] for x in a["top_apps"]}
         self.assertIn("terminal", apps)
-        self.assertNotIn("wellness", apps)
+        self.assertNotIn("wellness", apps)        # brain bookkeeping, not usage
+        self.assertNotIn("survey", apps)          # the rounds aren't usage
         self.assertGreater(a["hours_active"], 0)
         mem.close()
 

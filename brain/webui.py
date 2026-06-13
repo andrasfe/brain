@@ -68,10 +68,12 @@ def activity_summary(conn, since_ts: float, *, bucket_s: int = 3600,
     excluded): hourly active/passive buckets, top apps, ~hours active
     (15-minute granularity)."""
     now = time.time() if now is None else now
+    # Exclude the brain's own bookkeeping rows (wellness self-checks, window
+    # surveys, per-window reads) — they aren't the USER's app usage.
     rows = conn.execute(
         "SELECT ts, tags FROM episodes WHERE mem_type='observation' "
-        "AND ts >= ? AND (tags IS NULL OR tags NOT LIKE '%app:wellness%') "
-        "ORDER BY ts", (since_ts,)).fetchall()
+        "AND ts >= ? AND (tags IS NULL OR (tags NOT LIKE '%app:wellness%' "
+        "AND tags NOT LIKE '%app:survey%')) ORDER BY ts", (since_ts,)).fetchall()
     buckets: dict[int, dict[str, int]] = {}
     quarter_hours: set[int] = set()
     apps: Counter = Counter()

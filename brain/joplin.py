@@ -99,28 +99,36 @@ class JoplinClient:
             return None
 
     # ── notes (upsert by embedded marker) ───────────────────────────────────
-    def find_note_by_marker(self, key: str) -> Optional[str]:
-        """Locate a note carrying `<!-- brain:KEY -->` via full-text search.
-        Verifies the marker in the returned bodies (search is fuzzy)."""
+    def find_note_in_folder(self, parent_id: str, key: str) -> Optional[str]:
+        """Locate the note carrying `<!-- brain:KEY -->` by SCANNING the parent
+        notebook. Reliable immediately after creation — unlike /search, whose
+        index lags, so a re-sync would otherwise duplicate the page."""
+        page = 1
         try:
-            r = self._http().get("/search", params=self._params(
-                query=f"brain:{key}", type="note", fields="id,body"))
-            r.raise_for_status()
-            for it in r.json().get("items", []):
-                m = MARKER_RE.search(it.get("body", "") or "")
-                if m and m.group(1) == key:
-                    return it["id"]
+            while True:
+                r = self._http().get(
+                    f"/folders/{parent_id}/notes",
+                    params=self._params(page=page, fields="id,body"))
+                r.raise_for_status()
+                d = r.json()
+                for it in d.get("items", []):
+                    m = MARKER_RE.search(it.get("body", "") or "")
+                    if m and m.group(1) == key:
+                        return it["id"]
+                if not d.get("has_more"):
+                    break
+                page += 1
         except Exception:
             return None
         return None
 
     def upsert_note(self, parent_id: str, title: str, body: str,
                     key: str) -> Optional[str]:
-        """Create or update the note identified by `key`. The marker is embedded
-        once at the top of the body. Returns the note id."""
+        """Create or update the note identified by `key` within `parent_id`.
+        The marker is embedded once at the top of the body. Returns the id."""
         marker = marker_line(key)
         full = body if marker in body else f"{marker}\n\n{body}"
-        nid = self.find_note_by_marker(key)
+        nid = self.find_note_in_folder(parent_id, key)
         try:
             if nid:
                 r = self._http().put(f"/notes/{nid}", params=self._params(),
