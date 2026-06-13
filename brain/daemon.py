@@ -257,6 +257,15 @@ class BrainDaemon:
         sv_cfg = cfg.raw.get("survey") or {}
         if sv_cfg.get("enabled"):
             from brain.survey import WindowSurveyor
+            # Webcam empty-chair gate: a quick reflex-model yes/no on one frame.
+            presence_fn = None
+            if bool(sv_cfg.get("require_absence", False)):
+                from brain.wellness import person_present
+                # Strong model: the reflex one rambles unreliably on a yes/no
+                # face read; a wrong 'absent' would sweep windows while present.
+                _pm = (str((cfg.capture or {}).get("vision_model_strong", ""))
+                       or cfg.models.get("executive", ""))
+                presence_fn = lambda: person_present(brain.llm, _pm)  # noqa: E731
             self.surveyor = WindowSurveyor(
                 brain.memory,
                 interval_seconds=float(sv_cfg.get("interval_seconds", 600)),
@@ -267,7 +276,9 @@ class BrainDaemon:
                 max_window_reads=int(sv_cfg.get("max_window_reads", 4)),
                 exclude_apps=(cap_cfg.get("exclude_apps") or []),
                 spool_dir=Path(cfg.sandbox_dir) / "spool",
-                ttl_seconds=float(sv_cfg.get("ttl_seconds", 600)))
+                ttl_seconds=float(sv_cfg.get("ttl_seconds", 600)),
+                require_absence=bool(sv_cfg.get("require_absence", False)),
+                presence_fn=presence_fn)
 
         self.observer = None
         if cap_cfg.get("enabled") and getattr(brain, "embodiment", None) is not None:

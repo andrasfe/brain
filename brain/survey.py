@@ -195,7 +195,8 @@ class WindowSurveyor:
                  job_queue=None, pixel_reads: bool = False,
                  max_window_reads: int = 4, exclude_apps=None,
                  spool_dir=None, ttl_seconds: float = 600.0,
-                 quartz_list_fn=None, capture_fn=None):
+                 quartz_list_fn=None, capture_fn=None,
+                 require_absence: bool = False, presence_fn=None):
         self.memory = memory
         self.interval_seconds = float(interval_seconds)
         self.lull_seconds = float(lull_seconds)
@@ -211,6 +212,10 @@ class WindowSurveyor:
         self.ttl_seconds = float(ttl_seconds)
         self._qlist = quartz_list_fn or list_windows_quartz
         self._capture = capture_fn or capture_window
+        # When set, the sweep runs only when the WEBCAM confirms nobody is
+        # sitting — the empty-chair signal, stronger than keyboard idle.
+        self.require_absence = bool(require_absence)
+        self._presence_fn = presence_fn
         self._next_due = self._time_fn()   # eligible immediately on first lull
         self.surveys = 0
         self.window_reads_queued = 0
@@ -257,14 +262,36 @@ class WindowSurveyor:
                      present: Optional[bool]) -> dict[str, Any]:
         """Do the rounds when: present, in a LULL (idle past lull_seconds but
         not away), and the interval has elapsed. Never raises."""
-        if present is False:
-            return {"surveyed": False, "reason": "away"}
-        if idle is None or idle < self.lull_seconds or idle >= self.away_seconds:
-            return {"surveyed": False, "reason": "active or away"}
+        # Cheap pre-filter: only consider sweeping after a keyboard lull (don't
+        # check the camera while you're actively typing). When require_absence,
+        # we DON'T require daemon-presence (the webcam decides); without it, the
+        # old behavior (present + lull, below away) applies.
+        if idle is None or idle < self.lull_seconds:
+            return {"surveyed": False, "reason": "active"}
+        if not self.require_absence:
+            if present is False or idle >= self.away_seconds:
+                return {"surveyed": False, "reason": "away/absent (no camera gate)"}
         now = self._time_fn()
         if now < self._next_due:
             return {"surveyed": False, "reason": "not due"}
+        # Set next_due NOW so the (costly) presence check happens at most once
+        # per interval regardless of outcome — no per-tick camera blinking.
         self._next_due = now + self.interval_seconds
+
+        # Empty-chair gate: sweep only when nobody's sitting. Webcam is the
+        # primary signal; fall back to the keyboard away-threshold when the
+        # camera can't decide.
+        if self.require_absence:
+            pres = "unknown"
+            if self._presence_fn is not None:
+                try:
+                    pres = self._presence_fn()
+                except Exception:
+                    pres = "unknown"
+            if pres == "present":
+                return {"surveyed": False, "reason": "person present (webcam)"}
+            if pres == "unknown" and not (present is False or idle >= self.away_seconds):
+                return {"surveyed": False, "reason": "presence unknown, user likely here"}
         try:
             windows = self._list()
         except Exception as e:  # noqa: BLE001

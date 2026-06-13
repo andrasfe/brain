@@ -150,6 +150,53 @@ def build_wellness_instruction() -> str:
     )
 
 
+def person_present(llm, model: str, *, shoot_fn=None,
+                   warmup_seconds: float = 3.0) -> str:
+    """Quick 'is the chair occupied?' check via one webcam frame → 'present' |
+    'absent' | 'unknown'. Cheap yes/no (use the reflex model). Pixels dropped.
+    Used to gate the window survey: sweep only when nobody's sitting."""
+    import os
+    import tempfile
+    import re
+    shoot = shoot_fn or shoot_webcam
+    path = os.path.join(tempfile.mkdtemp(), "presence.jpg")
+    prompt = ("Look at this webcam image. Is a PERSON visibly present (a face "
+              "or body in frame)? Reply with EXACTLY one word: yes or no.")
+    try:
+        if not shoot(path, warmup_seconds=warmup_seconds):
+            return "unknown"
+        raw = ""
+        for _ in range(2):                # retry once (LM Studio JIT reloads)
+            try:
+                raw = llm.describe_image(model, prompt, path, max_tokens=700)
+            except Exception:
+                raw = ""
+            if raw.strip():
+                break
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    ans = clean_vision_text(raw).lower()
+    if not ans:
+        return "unknown"
+    has_yes = re.search(r"\byes\b", ans) is not None
+    has_no = re.search(r"\bno\b", ans) is not None
+    if has_yes and not has_no:
+        return "present"
+    if has_no and not has_yes:
+        return "absent"
+    # phrasing fallback when the model didn't give a clean yes/no
+    if any(p in ans for p in ("no person", "nobody", "no one", "empty",
+                              "unoccupied", "no human", "no face", "absent")):
+        return "absent"
+    if any(p in ans for p in ("person", "someone", "seated", "sitting", "a man",
+                              "a woman", "individual", "face", "head", "human")):
+        return "present"
+    return "unknown"
+
+
 def analyze_wellness(llm, model: str, photo_path: str) -> Optional[dict]:
     """VLM pass over a webcam still → structured reading, or None when no
     person is visible / output is degenerate. Never raises."""

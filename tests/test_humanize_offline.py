@@ -2084,6 +2084,24 @@ class WellnessTests(unittest.TestCase):
         self.assertIn("Do NOT identify", p)
         self.assertIn("other", p.lower())
 
+    def test_person_present_parsing(self):
+        from brain.wellness import person_present
+        def mk(answer):
+            llm = MagicMock(spec=["describe_image"])
+            llm.describe_image.return_value = answer
+            return llm
+        shoot_ok = lambda p, **k: (Path(p).write_bytes(b"jpg") or True)
+        self.assertEqual(person_present(mk("Yes."), "m", shoot_fn=shoot_ok), "present")
+        self.assertEqual(person_present(mk("No, the chair is empty."), "m",
+                                        shoot_fn=shoot_ok), "absent")
+        self.assertEqual(person_present(mk("No person is visible in the frame."),
+                                        "m", shoot_fn=shoot_ok), "absent")
+        self.assertEqual(person_present(mk("A person is sitting and facing the screen."),
+                                        "m", shoot_fn=shoot_ok), "present")
+        # camera failure → unknown (no describe call)
+        self.assertEqual(person_present(mk("x"), "m",
+                                        shoot_fn=lambda *a, **k: False), "unknown")
+
     def test_choose_camera_prefers_webcam_over_capture_card(self):
         from brain.wellness import choose_camera
         listing = (
@@ -2170,6 +2188,30 @@ class WindowSurveyTests(unittest.TestCase):
         self.assertFalse(s.maybe_survey(idle=60, present=True)["surveyed"])   # interval
         clock["t"] += 601
         self.assertTrue(s.maybe_survey(idle=60, present=True)["surveyed"])    # due again
+        mem.close()
+
+    def test_require_absence_gates_on_webcam(self):
+        from brain.survey import WindowSurveyor
+        from brain.memory import Memory
+        from brain.embeddings import TfidfBackend
+        mem = Memory(Path(tempfile.mkdtemp()) / "m.sqlite", backend=TfidfBackend())
+        clock = {"t": 1000.0}
+        pres = {"v": "present"}
+        s = WindowSurveyor(mem, interval_seconds=600, lull_seconds=45,
+                           away_seconds=300, time_fn=lambda: clock["t"],
+                           list_fn=lambda: [{"app": "Code", "titles": ["x"], "n": 1}],
+                           require_absence=True, presence_fn=lambda: pres["v"])
+        # idle past lull, but webcam says person present → no sweep
+        self.assertEqual(s.maybe_survey(idle=60, present=True)["reason"],
+                         "person present (webcam)")
+        # next interval: chair empty → sweep (even though daemon 'present' True)
+        clock["t"] += 601; pres["v"] = "absent"
+        self.assertTrue(s.maybe_survey(idle=60, present=True)["surveyed"])
+        # unknown + user not idle-away → skip; unknown + away-threshold → sweep
+        clock["t"] += 601; pres["v"] = "unknown"
+        self.assertFalse(s.maybe_survey(idle=60, present=True)["surveyed"])
+        clock["t"] += 601
+        self.assertTrue(s.maybe_survey(idle=999, present=False)["surveyed"])
         mem.close()
 
 

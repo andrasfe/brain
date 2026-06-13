@@ -232,3 +232,8 @@ survey:
   pixel_reads: false
   max_window_reads: 4         # cap background windows read per survey
   ttl_seconds: 600            # drop a queued window read older than this
+  # Empty-chair gate: do the window sweep only when the WEBCAM shows nobody
+  # sitting (checked once per interval after a keyboard lull) — so the rounds
+  # happen while you're away, not while you're reading. Falls back to the
+  # keyboard away-threshold when the camera can't decide.
+  require_absence: false
