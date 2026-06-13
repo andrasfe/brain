@@ -2310,6 +2310,120 @@ class WindowPixelReadTests(unittest.TestCase):
         mem.close()
 
 
+class JoplinPublishTests(unittest.TestCase):
+    """Joplin Data API client (mocked httpx) + daily-page publisher."""
+
+    class _Resp:
+        def __init__(self, data, status=200, text="JoplinClipperServer"):
+            self._d = data; self.status_code = status; self.text = text
+        def json(self): return self._d
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise RuntimeError(f"http {self.status_code}")
+
+    def _client_with(self, http):
+        from brain.joplin import JoplinClient
+        c = JoplinClient(token="tok")
+        c._client = http
+        return c
+
+    def test_ping(self):
+        http = MagicMock()
+        http.get.return_value = self._Resp({}, 200, "JoplinClipperServer")
+        self.assertTrue(self._client_with(http).ping())
+        http.get.return_value = self._Resp({}, 500, "nope")
+        self.assertFalse(self._client_with(http).ping())
+
+    def test_ensure_notebook_finds_then_creates(self):
+        http = MagicMock()
+        # GET /folders → empty; POST creates
+        http.get.return_value = self._Resp({"items": [], "has_more": False})
+        http.post.return_value = self._Resp({"id": "NB1"})
+        c = self._client_with(http)
+        self.assertEqual(c.ensure_notebook("Brain"), "NB1")
+        # cached: a second call doesn't POST again
+        http.post.reset_mock()
+        self.assertEqual(c.ensure_notebook("Brain"), "NB1")
+        http.post.assert_not_called()
+
+    def test_upsert_creates_then_updates_by_marker(self):
+        http = MagicMock()
+        # first upsert: search finds nothing → POST create
+        http.get.return_value = self._Resp({"items": []})
+        http.post.return_value = self._Resp({"id": "N1"})
+        c = self._client_with(http)
+        nid = c.upsert_note("NB1", "Brain — 2026-06-12", "body", "daily:2026-06-12")
+        self.assertEqual(nid, "N1")
+        # the created body carried the marker
+        self.assertIn("<!-- brain:daily:2026-06-12 -->",
+                      http.post.call_args.kwargs["json"]["body"])
+        # second upsert: search now returns the marked note → PUT update
+        http.get.return_value = self._Resp(
+            {"items": [{"id": "N1", "body": "<!-- brain:daily:2026-06-12 -->\nx"}]})
+        http.put.return_value = self._Resp({"id": "N1"})
+        nid2 = c.upsert_note("NB1", "Brain — 2026-06-12", "newbody",
+                             "daily:2026-06-12")
+        self.assertEqual(nid2, "N1")
+        http.put.assert_called_once()
+
+    def test_find_note_rejects_fuzzy_nonmatch(self):
+        http = MagicMock()
+        # search returns a note whose marker is a DIFFERENT key
+        http.get.return_value = self._Resp(
+            {"items": [{"id": "X", "body": "<!-- brain:daily:2099-01-01 -->"}]})
+        self.assertIsNone(self._client_with(http).find_note_by_marker("daily:2026-06-12"))
+
+    def test_build_daily_markdown(self):
+        from brain.publish import build_daily_markdown
+        from brain.memory import Memory, OBSERVATION, SEMANTIC
+        from brain.embeddings import TfidfBackend
+        from brain.sleep.journalist import _day_bounds, _date_of
+        mem = Memory(Path(tempfile.mkdtemp()) / "m.sqlite", backend=TfidfBackend())
+        date_str = _date_of(time.time())
+        lo, _ = _day_bounds(date_str)
+        def add(content, tags, mt=OBSERVATION, off=3600):
+            rid = mem.store(task="t", kind="k", content=content, mem_type=mt, tags=tags)
+            mem.conn.execute("UPDATE episodes SET ts=? WHERE id=?", (lo + off, rid))
+        add("[Chrome] Reading MLX docs", ["app:google chrome", "agency:active"])
+        add("[Terminal] git push", ["app:terminal", "agency:active"], off=3700)
+        add("[wellness] Alert; mood=focused; fatigue=0.3; tension=0.1",
+            ["app:wellness", "agency:active"], off=3800)
+        add("[survey] Chrome[1]: MLX docs · Code[1]: paper.tex",
+            ["app:survey", "agency:passive"], off=3900)
+        add(f"Journal {date_str}: You spent the day on the brain repo and MLX.",
+            ["journal", f"journal:{date_str}"], mt=SEMANTIC, off=4000)
+        mem.conn.commit()
+        md = build_daily_markdown(mem.conn, date_str, now=lo + 5000)
+        self.assertIn(f"# {date_str}", md)
+        self.assertIn("## Journal", md)
+        self.assertIn("brain repo and MLX", md)
+        self.assertIn("## Activity", md)
+        self.assertIn("google chrome", md.lower())
+        self.assertIn("## Wellness", md)
+        self.assertIn("focused", md)
+        self.assertIn("## Windows open", md)
+        mem.close()
+
+    def test_publisher_sync_upserts_per_day(self):
+        from brain.publish import KnowledgePublisher
+        from brain.memory import Memory, OBSERVATION
+        from brain.embeddings import TfidfBackend
+        from brain.sleep.journalist import _date_of
+        mem = Memory(Path(tempfile.mkdtemp()) / "m.sqlite", backend=TfidfBackend())
+        mem.store(task="t", kind="k", content="[Terminal] work",
+                  mem_type=OBSERVATION, tags=["app:terminal", "agency:active"])
+        backend = MagicMock()
+        backend.ensure_notebook.side_effect = ["ROOT", "DAILY"]
+        backend.upsert_note.return_value = "N1"
+        out = KnowledgePublisher(backend).sync(mem, days_back=1)
+        self.assertEqual(out["published"], 1)
+        # upserted into the Daily notebook with a daily key
+        args = backend.upsert_note.call_args
+        self.assertEqual(args[0][0], "DAILY")
+        self.assertTrue(args[0][3].startswith("daily:"))
+        mem.close()
+
+
 class WebUITests(unittest.TestCase):
     """Dashboard aggregates — wellness series, usage analytics, ask context."""
 

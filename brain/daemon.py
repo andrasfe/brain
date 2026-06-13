@@ -92,6 +92,7 @@ class DaemonStats:
     digests_written: int = 0
     wellness_checks: int = 0
     surveys: int = 0
+    pages_published: int = 0
     screen_model_trains: int = 0
     vision_rules_learned: int = 0
     observations_pruned: int = 0
@@ -180,6 +181,24 @@ class BrainDaemon:
         # At most one digest (one executive call) per NREM bout; idempotent.
         self.journalist = Journalist(
             journal_dir=Path(cfg.db_path).parent / "journal")
+        # Knowledge publisher: push daily pages to Joplin (Data API → Joplin
+        # Server → your devices). Built only when enabled + the API is
+        # reachable; SQLite stays the operational store. Best-effort.
+        self.publisher = None
+        jp_cfg = cfg.raw.get("joplin") or {}
+        if jp_cfg.get("enabled"):
+            import os as _os
+            from brain.joplin import JoplinClient
+            from brain.publish import KnowledgePublisher
+            token = _os.environ.get("JOPLIN_TOKEN", "") or str(jp_cfg.get("token", ""))
+            jclient = JoplinClient(
+                str(jp_cfg.get("base_url", "http://localhost:41184")), token)
+            if jclient.ping():
+                self.publisher = KnowledgePublisher(jclient)
+                self._publish_days = int(jp_cfg.get("days_back", 2))
+            else:
+                self.log("  ⚠ joplin enabled but Data API not reachable "
+                         f"({jclient.base_url}) — publishing off")
         # Teacher-student: the executive model curates the student's
         # screen-reading skill during sleep. Only when capture is on.
         self.vision_teacher = (
@@ -737,6 +756,18 @@ class BrainDaemon:
                     self.stats.digests_written += 1
             except Exception as e:
                 self.log(f"  ⚠ journalist failed: {type(e).__name__}: {e}")
+            # knowledge publisher: push recent daily pages to Joplin (after the
+            # journal lands, so today's page includes it).
+            if self.publisher is not None:
+                try:
+                    pub = self.publisher.sync(self.brain.memory,
+                                              days_back=self._publish_days)
+                    if pub.get("published"):
+                        self.stats.pages_published += pub["published"]
+                        self.log(f"  📓 published {pub['published']} daily "
+                                 f"page(s) to Joplin")
+                except Exception as e:
+                    self.log(f"  ⚠ joplin publish failed: {type(e).__name__}: {e}")
             # screen-sequence trainer: learn the dynamics of the user's day
             # (next-screen prediction) from the observation stream; refresh the
             # live occipital model.

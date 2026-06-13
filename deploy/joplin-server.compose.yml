@@ -1,0 +1,46 @@
+# Joplin Server — self-hosted sync backend for cross-device notes.
+#
+# The brain publishes notes via a Joplin CLIENT's Data API (desktop Web Clipper
+# or the headless terminal app); that client SYNCs here, and your phone/laptop
+# Joplin apps sync here too. This server does not itself take the brain's notes
+# directly — point a Joplin client at it (Settings → Synchronisation → Joplin
+# Server, URL http://localhost:22300).
+#
+#   cp deploy/joplin.env.example deploy/joplin.env   # then edit secrets
+#   docker compose --env-file deploy/joplin.env -f deploy/joplin-server.compose.yml up -d
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_USER: ${POSTGRES_USER:-joplin}
+      POSTGRES_DB: ${POSTGRES_DB:-joplin}
+    volumes:
+      - joplin-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-joplin}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    image: joplin/server:latest
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "22300:22300"
+    environment:
+      APP_PORT: 22300
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:22300}
+      DB_CLIENT: pg
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DATABASE: ${POSTGRES_DB:-joplin}
+      POSTGRES_USER: ${POSTGRES_USER:-joplin}
+      POSTGRES_PORT: 5432
+      POSTGRES_HOST: db
+
+volumes:
+  joplin-db:

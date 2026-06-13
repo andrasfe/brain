@@ -62,3 +62,4 @@ memory.sqlite3-shm
 memory.sqlite3-wal
 brain-webui-you.png
 brain-webui-avatar.png
+deploy/joplin.env

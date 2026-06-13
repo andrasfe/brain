@@ -221,6 +221,18 @@ wellness:
 # titles (osascript System Events — no focus change, no screenshots, no deps)
 # and records a survey observation, so Recall/journal/UI can answer "what did
 # I have open this afternoon?". Off by default.
+# Joplin publishing — push the human-readable layer (a daily markdown page:
+# journal + activity + mood + windows-open) to Joplin via its Data API, which
+# syncs to your Joplin Server and all devices. SQLite stays the operational
+# store. Needs a Joplin client exposing the Data API (desktop Web Clipper on
+# :41184, or the headless terminal app) and its token. Token from the
+# JOPLIN_TOKEN env var or `token` here. No-ops when the API isn't reachable.
+joplin:
+  enabled: false
+  base_url: "http://localhost:41184"
+  token: ""                   # or set JOPLIN_TOKEN in the environment
+  days_back: 2                # re-sync today + yesterday each NREM bout
+
 survey:
   enabled: false
   interval_seconds: 600       # ~10 min between rounds
