@@ -462,8 +462,13 @@ white-space:pre-wrap}
 font-size:11px;font-weight:600;padding:3px 10px;border-radius:8px}
 .cardhead{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
 .cardhead h2{margin:0}
+.avatar{width:46px;height:46px;border-radius:50%;object-fit:cover;cursor:pointer;
+border:2px solid rgba(167,139,250,.55);box-shadow:0 0 16px rgba(167,139,250,.35);
+background:var(--card);flex:0 0 auto}
+.avatar.off{display:none}
 </style></head><body><div class="wrap">
 <header>
+  <img id="avatar" class="avatar off" title="you — click to refresh" alt="">
   <h1>🧠 brain</h1>
   <span class="pill" id="state"><span class="dot" style="background:var(--mut)"></span>…</span>
   <span class="pill" id="presence">presence …</span>
@@ -609,11 +614,18 @@ try{const r=await fetch('/api/screen');const d=await r.json();
 if(d.jpg){$('liveimg').src='data:image/jpeg;base64,'+d.jpg;$('liveimg').style.display='block'}}catch(e){}}
 $('livebtn').onclick=()=>{LIVE=!LIVE;$('livebtn').textContent=LIVE?'stop':'start';
 if(LIVE){liveTick();liveT=setInterval(liveTick,6000)}else{clearInterval(liveT);$('liveimg').style.display='none'}};
-$('facebtn').onclick=async()=>{$('facebtn').disabled=true;$('facebtn').textContent='📷 …';
+let FACEBUSY=false;
+async function faceRefresh(){if(FACEBUSY)return;FACEBUSY=true;
 try{const r=await fetch('/api/face');const d=await r.json();
-if(d.jpg){$('faceimg').src='data:image/jpeg;base64,'+d.jpg;$('faceimg').style.display='block'}
-else{$('facesum').textContent='camera unavailable: '+(d.error||'')}}catch(e){}
-$('facebtn').disabled=false;$('facebtn').textContent='📷 take a look';refresh()};
+if(d.jpg){const src='data:image/jpeg;base64,'+d.jpg;
+$('faceimg').src=src;$('faceimg').style.display='block';
+$('avatar').src=src;$('avatar').classList.remove('off');}
+else if(!$('avatar').src){$('facesum').textContent='camera unavailable: '+(d.error||'')}}
+catch(e){}FACEBUSY=false}
+$('facebtn').onclick=async()=>{$('facebtn').disabled=true;$('facebtn').textContent='📷 …';
+await faceRefresh();$('facebtn').disabled=false;$('facebtn').textContent='📷 take a look';refresh()};
+$('avatar').onclick=faceRefresh;
+faceRefresh();setInterval(faceRefresh,120000);   // top-left face, gentle refresh
 let LOGCLEAR=0;
 async function logsTick(){try{const r=await fetch('/api/logs?n=160');const d=await r.json();
 const el=$('logs');const atBottom=el.scrollHeight-el.scrollTop-el.clientHeight<40;
