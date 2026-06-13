@@ -2361,6 +2361,27 @@ class WebUITests(unittest.TestCase):
         self.assertEqual(hist[1]["answer"], "done it well")
         self.assertEqual(hist[1]["status"], "done")
 
+    def test_latest_wellness_parses_reading(self):
+        from brain.webui import latest_wellness
+        from brain.memory import Memory, OBSERVATION
+        from brain.embeddings import TfidfBackend
+        mem = Memory(Path(tempfile.mkdtemp()) / "m.sqlite", backend=TfidfBackend())
+        mem.store(task="t", kind="k", mem_type=OBSERVATION,
+                  content="[wellness] Alert and focused; mood=focused; "
+                          "wearing: grey tee, glasses; notable: a cat; "
+                          "fatigue=0.4; tension=0.2",
+                  tags=["app:wellness", "agency:active"])
+        lw = latest_wellness(mem.conn)
+        self.assertEqual(lw["mood"], "focused")
+        self.assertEqual(lw["fatigue"], 0.4)
+        self.assertEqual(lw["wearing"], "grey tee, glasses")
+        self.assertEqual(lw["notable"], "a cat")
+        self.assertIn("Alert and focused", lw["summary"])
+        self.assertIsNone(latest_wellness(
+            Memory(Path(tempfile.mkdtemp()) / "e.sqlite",
+                   backend=TfidfBackend()).conn))
+        mem.close()
+
     def test_ask_uses_llm(self):
         from brain.webui import ask
         mem, now = self._conn()

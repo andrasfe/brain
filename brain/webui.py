@@ -178,6 +178,50 @@ def tail_log(path, n: int = 120) -> list[str]:
     return [ln for ln in lines if ln.strip()][-n:]
 
 
+def grab_webcam_b64() -> Optional[str]:
+    """One TRANSIENT webcam frame for the 'You' panel: shoot → base64 → delete.
+    Never stored (same privacy spine as the wellness check / live screen view)."""
+    import base64
+    import os
+    import tempfile
+    from .wellness import shoot_webcam
+    path = os.path.join(tempfile.mkdtemp(), "face.jpg")
+    try:
+        if not shoot_webcam(path):
+            return None
+        return base64.b64encode(open(path, "rb").read()).decode()
+    except Exception:
+        return None
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def latest_wellness(conn) -> Optional[dict[str, Any]]:
+    """Most recent wellness reading (parsed from its stored text). Pixels were
+    never kept — this is the inference only."""
+    row = conn.execute(
+        "SELECT ts, content FROM episodes WHERE mem_type='observation' "
+        "AND tags LIKE '%app:wellness%' ORDER BY ts DESC LIMIT 1").fetchone()
+    if row is None:
+        return None
+    c = row["content"] or ""
+    f = _FATIGUE_RE.search(c)
+    t = _TENSION_RE.search(c)
+    m = _MOOD_RE.search(c)
+    wearing = re.search(r"wearing:\s*([^;]+)", c)
+    notable = re.search(r"notable:\s*([^;]+)", c)
+    return {"ts": float(row["ts"]),
+            "summary": c.split(";")[0].replace("[wellness]", "").strip()[:200],
+            "mood": m.group(1) if m else None,
+            "fatigue": float(f.group(1)) if f else None,
+            "tension": float(t.group(1)) if t else None,
+            "wearing": wearing.group(1).strip()[:120] if wearing else None,
+            "notable": notable.group(1).strip()[:160] if notable else None}
+
+
 def grab_screen_b64(max_width: int = 800) -> Optional[str]:
     """One TRANSIENT screenshot for the live-view panel: capture → downscale →
     base64 → delete. Never stored; served only to the local UI."""
@@ -266,6 +310,7 @@ def serve(cfg, host: str = "127.0.0.1", port: int = 8800,
                             "activity": activity_summary(conn, since),
                             "journal": journal_entries(conn, 4),
                             "tasks": read_task_history(task_history_path, 20),
+                            "latest_wellness": latest_wellness(conn),
                         })
                     finally:
                         conn.close()
@@ -276,6 +321,12 @@ def serve(cfg, host: str = "127.0.0.1", port: int = 8800,
                     b64 = grab_screen_b64()
                     if b64 is None:
                         self._json({"error": "screencapture unavailable"}, 503)
+                    else:
+                        self._json({"jpg": b64})
+                elif path == "/api/face":
+                    b64 = grab_webcam_b64()
+                    if b64 is None:
+                        self._json({"error": "webcam unavailable"}, 503)
                     else:
                         self._json({"jpg": b64})
                 else:
@@ -450,6 +501,13 @@ font-size:11px;font-weight:600;padding:3px 10px;border-radius:8px}
     in its next waking cycle.</div></div>
   <div class="card w8 tasks"><div class="cardhead"><h2>Task history</h2></div>
     <div id="tasks" class="sub">no tasks yet</div></div>
+  <div class="card w4 live"><div class="cardhead"><h2>You</h2>
+    <button class="hbtn" id="facebtn">📷 take a look</button></div>
+    <img id="faceimg" style="display:none" alt="">
+    <div class="big" id="facemood" style="font-size:18px"></div>
+    <div class="sub" id="facesum"></div>
+    <div class="note" id="facemeta"></div>
+    <div class="note">Fresh frame on demand — shown then discarded, never stored.</div></div>
   <div class="card w4 live"><div class="cardhead"><h2>Live view</h2>
     <button class="hbtn" id="livebtn">start</button></div>
     <img id="liveimg" style="display:none" alt="">
@@ -507,6 +565,11 @@ const wl=d.wellness||[];
 $('moodsvg').innerHTML=line('moodsvg',wl,'fatigue','var(--rd)',1)+line('moodsvg',wl,'tension','var(--am)',1)+moodLabels(wl);
 const last=wl[wl.length-1];
 $('lastwl').textContent=last?`latest (${fmt(last.ts)}): ${last.mood??''} — ${last.summary}`:'no self-checks in window yet';
+const lw=d.latest_wellness;
+if(lw){$('facemood').textContent=(lw.mood?lw.mood:'')+(lw.fatigue!=null?`  ·  fatigue ${lw.fatigue}`:'');
+$('facesum').textContent=lw.summary||'';
+$('facemeta').textContent=[lw.wearing?('wearing: '+lw.wearing):'',lw.notable?('notable: '+lw.notable):'',lw.ts?('— '+fmt(lw.ts)):''].filter(Boolean).join('  ');}
+else{$('facesum').textContent='no self-check recorded yet'}
 $('journal').innerHTML=(d.journal||[]).map(j=>{const m=j.content.match(/^Journal (\d{4}-\d{2}-\d{2}):\s*(.*)$/s);
 return `<p><span class="d">${m?m[1]:fmt(j.ts)}</span><br>${(m?m[2]:j.content).slice(0,360)}…</p>`}).join('')||'no entries yet';
 const hist=d.tasks||[];const histTexts=new Set(hist.map(t=>t.task));
@@ -546,6 +609,11 @@ try{const r=await fetch('/api/screen');const d=await r.json();
 if(d.jpg){$('liveimg').src='data:image/jpeg;base64,'+d.jpg;$('liveimg').style.display='block'}}catch(e){}}
 $('livebtn').onclick=()=>{LIVE=!LIVE;$('livebtn').textContent=LIVE?'stop':'start';
 if(LIVE){liveTick();liveT=setInterval(liveTick,6000)}else{clearInterval(liveT);$('liveimg').style.display='none'}};
+$('facebtn').onclick=async()=>{$('facebtn').disabled=true;$('facebtn').textContent='📷 …';
+try{const r=await fetch('/api/face');const d=await r.json();
+if(d.jpg){$('faceimg').src='data:image/jpeg;base64,'+d.jpg;$('faceimg').style.display='block'}
+else{$('facesum').textContent='camera unavailable: '+(d.error||'')}}catch(e){}
+$('facebtn').disabled=false;$('facebtn').textContent='📷 take a look';refresh()};
 let LOGCLEAR=0;
 async function logsTick(){try{const r=await fetch('/api/logs?n=160');const d=await r.json();
 const el=$('logs');const atBottom=el.scrollHeight-el.scrollTop-el.clientHeight<40;
