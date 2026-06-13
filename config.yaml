@@ -214,3 +214,14 @@ wellness:
   camera_warmup_seconds: 3.0  # auto-exposure needs ~3s on external webcams
   camera_device: "auto"       # auto-picks the most webcam-like device (skips
                               # capture cards / screen devices); or an index
+
+# Window survey — the brain's quiet 'rounds'. During a lull (you've stepped
+# back: idle past lull_seconds but the screensaver isn't on), ~every
+# interval_seconds it NON-DISRUPTIVELY enumerates every open app + its window
+# titles (osascript System Events — no focus change, no screenshots, no deps)
+# and records a survey observation, so Recall/journal/UI can answer "what did
+# I have open this afternoon?". Off by default.
+survey:
+  enabled: false
+  interval_seconds: 600       # ~10 min between rounds
+  lull_seconds: 45            # only when you've been inactive at least this long

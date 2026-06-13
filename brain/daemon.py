@@ -91,6 +91,7 @@ class DaemonStats:
     visual_replays: int = 0
     digests_written: int = 0
     wellness_checks: int = 0
+    surveys: int = 0
     screen_model_trains: int = 0
     vision_rules_learned: int = 0
     observations_pruned: int = 0
@@ -249,6 +250,18 @@ class BrainDaemon:
                 device=str(wl_cfg.get("camera_device", "auto")))
             if not self.wellness.ok:
                 self.log(f"  ⚠ wellness refused: {self.wellness.reason}")
+
+        # Window survey: enumerate open apps + titles during idle lulls. No
+        # camera/queue needed (osascript only); shares the away threshold.
+        self.surveyor = None
+        sv_cfg = cfg.raw.get("survey") or {}
+        if sv_cfg.get("enabled"):
+            from brain.survey import WindowSurveyor
+            self.surveyor = WindowSurveyor(
+                brain.memory,
+                interval_seconds=float(sv_cfg.get("interval_seconds", 600)),
+                lull_seconds=float(sv_cfg.get("lull_seconds", 45)),
+                away_seconds=self.away_threshold_s)
 
         self.observer = None
         if cap_cfg.get("enabled") and getattr(brain, "embodiment", None) is not None:
@@ -436,6 +449,18 @@ class BrainDaemon:
                     self.log("  📷 wellness check queued (webcam still spooled)")
             except Exception as e:
                 self.log(f"[daemon] wellness error: {e}")
+
+        # ── window survey (the rounds): during a lull, note what's open ─────
+        if self.surveyor is not None:
+            try:
+                s = self.surveyor.maybe_survey(idle=idle,
+                                               present=self._user_present)
+                if s.get("surveyed"):
+                    self.stats.surveys += 1
+                    self.log(f"  🗂 window survey: {s['n_apps']} apps — "
+                             f"{s['summary']}")
+            except Exception as e:
+                self.log(f"[daemon] survey error: {e}")
 
         # ── publish live status for the UI ─────────────────────────────────
         self._write_status()

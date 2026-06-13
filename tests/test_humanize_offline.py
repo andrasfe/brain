@@ -2105,6 +2105,74 @@ class WellnessTests(unittest.TestCase):
         self.assertIsNone(choose_camera(""))
 
 
+class WindowSurveyTests(unittest.TestCase):
+    """Non-disruptive 'rounds': enumerate open apps + titles during lulls."""
+
+    SAMPLE = ("Google Chrome\t::\tReddit - r/claudeopus\tGmail - Inbox\t\n"
+              "Finder\t::\t\n"                       # skipped app
+              "Code\t::\tdaemon.py — brain\tdaemon.py — brain\t\n"  # dup title
+              "Terminal\t::\tzsh — 80x24\t\n"
+              "garbage line without separator\n")
+
+    def test_list_windows_parses_and_dedups_and_skips(self):
+        from brain.survey import list_windows
+        w = list_windows(run=lambda *_: self.SAMPLE)
+        apps = {x["app"]: x for x in w}
+        self.assertNotIn("Finder", apps)              # in skip list
+        self.assertEqual(apps["Google Chrome"]["titles"],
+                         ["Reddit - r/claudeopus", "Gmail - Inbox"])
+        self.assertEqual(apps["Code"]["titles"], ["daemon.py — brain"])  # deduped
+        self.assertEqual(apps["Code"]["n"], 1)
+
+    def test_list_windows_graceful_on_failure(self):
+        from brain.survey import list_windows
+        def boom(*_):
+            raise RuntimeError("osascript missing")
+        self.assertEqual(list_windows(run=boom), [])
+
+    def test_render_and_tags(self):
+        from brain.survey import list_windows, render_survey, topic_tags_from_windows
+        w = list_windows(run=lambda *_: self.SAMPLE)
+        r = render_survey(w)
+        self.assertIn("Google Chrome[2]: Reddit", r)
+        self.assertIn("Code[1]: daemon.py", r)
+        self.assertIn("topic:terminal", topic_tags_from_windows(w))
+
+    def test_record_survey_tagged_for_exclusion_and_recall(self):
+        from brain.survey import record_survey, list_windows
+        from brain.memory import Memory, OBSERVATION
+        from brain.embeddings import TfidfBackend
+        mem = Memory(Path(tempfile.mkdtemp()) / "m.sqlite", backend=TfidfBackend())
+        record_survey(mem, list_windows(run=lambda *_: self.SAMPLE))
+        row = mem.conn.execute(
+            "SELECT content, tags FROM episodes WHERE mem_type=?",
+            (OBSERVATION,)).fetchone()
+        self.assertIn("[survey]", row["content"])
+        self.assertIn("app:survey", row["tags"])       # excluded from usage counts
+        self.assertIn("agency:passive", row["tags"])   # brain's rounds, not user
+        self.assertIn("topic:terminal", row["tags"])   # queryable by app
+        mem.close()
+
+    def test_cadence_lull_present_interval(self):
+        from brain.survey import WindowSurveyor
+        from brain.memory import Memory
+        from brain.embeddings import TfidfBackend
+        mem = Memory(Path(tempfile.mkdtemp()) / "m.sqlite", backend=TfidfBackend())
+        clock = {"t": 1000.0}
+        s = WindowSurveyor(mem, interval_seconds=600, lull_seconds=45,
+                           away_seconds=300, time_fn=lambda: clock["t"],
+                           list_fn=lambda: [{"app": "Code", "titles": ["x"], "n": 1}])
+        self.assertFalse(s.maybe_survey(idle=10, present=True)["surveyed"])   # active
+        self.assertFalse(s.maybe_survey(idle=None, present=True)["surveyed"]) # unknown
+        self.assertFalse(s.maybe_survey(idle=60, present=False)["surveyed"])  # away
+        self.assertFalse(s.maybe_survey(idle=999, present=True)["surveyed"])  # >away
+        self.assertTrue(s.maybe_survey(idle=60, present=True)["surveyed"])    # lull → go
+        self.assertFalse(s.maybe_survey(idle=60, present=True)["surveyed"])   # interval
+        clock["t"] += 601
+        self.assertTrue(s.maybe_survey(idle=60, present=True)["surveyed"])    # due again
+        mem.close()
+
+
 class WebUITests(unittest.TestCase):
     """Dashboard aggregates — wellness series, usage analytics, ask context."""
 
