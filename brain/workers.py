@@ -166,5 +166,46 @@ def run_wellness_check(payload: dict, ctx: dict) -> None:
             f"— {reading['summary'][:100]}")
 
 
+def run_window_read(payload: dict, ctx: dict) -> None:
+    """Strong-model read of one spooled BACKGROUND window image → observation.
+    Tagged app:survey (kept out of usage counts) + topic:<app> (queryable).
+    Pixels always dropped."""
+    import os
+    from .observer import clean_vision_text
+    from .survey import window_read_instruction
+    from .memory import OBSERVATION
+
+    cfg = ctx["cfg"]
+    spool = payload.get("spool")
+    app = payload.get("app") or "?"
+    title = payload.get("title") or ""
+    if not spool or not os.path.exists(spool):
+        return
+    model = (str((cfg.capture or {}).get("vision_model_strong", ""))
+             or cfg.models.get("executive", ""))
+    desc = ""
+    try:
+        raw = ctx["llm"].describe_image(
+            model, window_read_instruction(app, title), spool, max_tokens=900)
+        desc = clean_vision_text(raw)
+    finally:
+        try:
+            os.remove(spool)
+        except OSError:
+            pass
+    if not desc:
+        return
+    content = f"[window:{app}] {desc}"
+    if title:
+        content += f" (title: {title[:80]})"
+    tags = ["app:survey", "agency:passive", f"topic:{app.lower()}"]
+    ctx["memory"].store(task="window_read", kind="activity", content=content[:500],
+                        salience=0.5, mem_type=OBSERVATION, tags=tags)
+    log = ctx.get("log")
+    if log:
+        log(f"  🪟 window read [{app}] → {desc[:90]}")
+
+
 DEFAULT_HANDLERS = {"deep_read": run_deep_read,
-                    "wellness_check": run_wellness_check}
+                    "wellness_check": run_wellness_check,
+                    "window_read": run_window_read}

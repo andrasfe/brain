@@ -2173,6 +2173,101 @@ class WindowSurveyTests(unittest.TestCase):
         mem.close()
 
 
+class WindowPixelReadTests(unittest.TestCase):
+    """Tier-2 — per-window pixel reads via Quartz (mocked), queue-deferred."""
+
+    def _surveyor(self, q, spool, **kw):
+        from brain.survey import WindowSurveyor
+        from brain.memory import Memory
+        from brain.embeddings import TfidfBackend
+        mem = Memory(Path(tempfile.mkdtemp()) / "m.sqlite", backend=TfidfBackend())
+        clock = {"t": 1000.0}
+        # fake quartz list: frontmost first, then background windows
+        qwins = [{"id": 1, "app": "Terminal", "title": "t", "w": 800, "h": 600},
+                 {"id": 2, "app": "Slack", "title": "#general", "w": 2000, "h": 1200},
+                 {"id": 3, "app": "1Password", "title": "vault", "w": 900, "h": 700},
+                 {"id": 4, "app": "Code", "title": "main.tex", "w": 3000, "h": 1800}]
+        captured = []
+        def cap(wid, dest, **_):
+            captured.append(wid); Path(dest).write_bytes(b"jpg"); return True
+        s = WindowSurveyor(
+            mem, interval_seconds=600, lull_seconds=45, away_seconds=300,
+            time_fn=lambda: clock["t"],
+            list_fn=lambda: [{"app": "Terminal", "titles": ["t"], "n": 1}],
+            job_queue=q, pixel_reads=True, max_window_reads=2,
+            exclude_apps=["1Password"], spool_dir=spool,
+            quartz_list_fn=lambda: qwins, capture_fn=cap, **kw)
+        return s, mem, captured, clock
+
+    def test_enqueues_background_windows_skips_frontmost_and_excluded(self):
+        # patch quartz_available True for the test environment
+        import brain.survey as sv
+        from brain.jobqueue import JobQueue
+        q = JobQueue(Path(tempfile.mkdtemp()) / "j.sqlite")
+        spool = Path(tempfile.mkdtemp())
+        orig = sv.quartz_available
+        sv.quartz_available = lambda: True
+        try:
+            s, mem, captured, clock = self._surveyor(q, spool)
+            out = s.maybe_survey(idle=60, present=True)
+        finally:
+            sv.quartz_available = orig
+        self.assertTrue(out["surveyed"])
+        self.assertEqual(out["window_reads"], 2)        # capped at max_window_reads
+        # frontmost (id 1 Terminal) skipped; 1Password excluded; largest bg first:
+        self.assertEqual(captured, [4, 2])              # Code (biggest), then Slack
+        self.assertEqual(q.depth("window_read"), 2)
+        job = q.claim(now=clock["t"])
+        self.assertIn(job["payload"]["app"], ("Code", "Slack"))
+        self.assertTrue(Path(job["payload"]["spool"]).exists())
+        mem.close(); q.close()
+
+    def test_no_pixel_reads_when_disabled(self):
+        import brain.survey as sv
+        from brain.jobqueue import JobQueue
+        q = JobQueue(Path(tempfile.mkdtemp()) / "j.sqlite")
+        spool = Path(tempfile.mkdtemp())
+        orig = sv.quartz_available; sv.quartz_available = lambda: True
+        try:
+            s, mem, captured, _ = self._surveyor(q, spool)
+            s.pixel_reads = False
+            out = s.maybe_survey(idle=60, present=True)
+        finally:
+            sv.quartz_available = orig
+        self.assertTrue(out["surveyed"])
+        self.assertEqual(out.get("window_reads"), 0)
+        self.assertEqual(captured, [])
+        mem.close(); q.close()
+
+    def test_window_read_handler_stores_and_drops(self):
+        from brain.workers import run_window_read
+        from brain.memory import Memory, OBSERVATION
+        from brain.embeddings import TfidfBackend
+        from brain.config import Config
+        tmp = Path(tempfile.mkdtemp())
+        spool = tmp / "win.spool.jpg"; spool.write_bytes(b"jpg")
+        cfg = Config(raw={}, api_key="", base_url="http://localhost:1234/v1",
+                     require_auth=False, extra_headers={},
+                     models={"reflex": "fast", "executive": "smart"},
+                     timeout_seconds=10, max_retries=0, sandbox_dir=tmp,
+                     db_path=tmp / "m.sqlite", loop={}, memory={}, effectors={},
+                     regions={}, capture={"vision_model_strong": ""})
+        mem = Memory(cfg.db_path, backend=TfidfBackend())
+        llm = MagicMock(spec=["describe_image"])
+        llm.describe_image.return_value = "A Slack thread about model migration."
+        run_window_read({"spool": str(spool), "app": "Slack", "title": "#general"},
+                        {"cfg": cfg, "llm": llm, "memory": mem})
+        self.assertFalse(spool.exists())                    # pixels dropped
+        row = mem.conn.execute(
+            "SELECT content, tags FROM episodes WHERE mem_type=?",
+            (OBSERVATION,)).fetchone()
+        self.assertIn("[window:Slack]", row["content"])
+        self.assertIn("app:survey", row["tags"])            # out of usage counts
+        self.assertIn("topic:slack", row["tags"])
+        self.assertEqual(llm.describe_image.call_args[0][0], "smart")
+        mem.close()
+
+
 class WebUITests(unittest.TestCase):
     """Dashboard aggregates — wellness series, usage analytics, ask context."""
 

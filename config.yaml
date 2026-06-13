@@ -225,3 +225,10 @@ survey:
   enabled: false
   interval_seconds: 600       # ~10 min between rounds
   lull_seconds: 45            # only when you've been inactive at least this long
+  # Tier-2: also read the PIXELS of background windows (Quartz: screenshot each
+  # window by id — no focus change, occluded content included), strong-VLM read
+  # of content, deferred via the job queue. Needs pyobjc-framework-Quartz.
+  # Sensitive apps (capture.exclude_apps) are skipped; pixels dropped after.
+  pixel_reads: false
+  max_window_reads: 4         # cap background windows read per survey
+  ttl_seconds: 600            # drop a queued window read older than this

@@ -261,7 +261,13 @@ class BrainDaemon:
                 brain.memory,
                 interval_seconds=float(sv_cfg.get("interval_seconds", 600)),
                 lull_seconds=float(sv_cfg.get("lull_seconds", 45)),
-                away_seconds=self.away_threshold_s)
+                away_seconds=self.away_threshold_s,
+                job_queue=self.job_queue,
+                pixel_reads=bool(sv_cfg.get("pixel_reads", False)),
+                max_window_reads=int(sv_cfg.get("max_window_reads", 4)),
+                exclude_apps=(cap_cfg.get("exclude_apps") or []),
+                spool_dir=Path(cfg.sandbox_dir) / "spool",
+                ttl_seconds=float(sv_cfg.get("ttl_seconds", 600)))
 
         self.observer = None
         if cap_cfg.get("enabled") and getattr(brain, "embodiment", None) is not None:
@@ -457,7 +463,9 @@ class BrainDaemon:
                                                present=self._user_present)
                 if s.get("surveyed"):
                     self.stats.surveys += 1
-                    self.log(f"  🗂 window survey: {s['n_apps']} apps — "
+                    extra = (f" (+{s['window_reads']} window reads queued)"
+                             if s.get("window_reads") else "")
+                    self.log(f"  🗂 window survey: {s['n_apps']} apps{extra} — "
                              f"{s['summary']}")
             except Exception as e:
                 self.log(f"[daemon] survey error: {e}")

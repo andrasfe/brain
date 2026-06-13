@@ -19,8 +19,11 @@ without it the app list still comes through, just title-less.
 """
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 import time
+from pathlib import Path
 from typing import Any, Optional
 
 from .memory import OBSERVATION
@@ -79,6 +82,74 @@ def _osascript(script: str, timeout: float) -> str:
     return r.stdout or ""
 
 
+# ── Tier-2: per-window PIXEL reads (Quartz) ──────────────────────────────────
+def quartz_available() -> bool:
+    try:
+        import Quartz  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def list_windows_quartz(*, min_w: int = 200, min_h: int = 150) -> list[dict[str, Any]]:
+    """On-screen normal windows in front-to-back order, each with a CGWindowID
+    we can screenshot WITHOUT raising it: [{id, app, title, w, h}]. Skips
+    menubar/dock (layer != 0) and tiny popovers. [] when Quartz is absent."""
+    try:
+        import Quartz
+        wl = Quartz.CGWindowListCopyWindowInfo(
+            Quartz.kCGWindowListOptionOnScreenOnly, Quartz.kCGNullWindowID)
+    except Exception:
+        return []
+    out: list[dict[str, Any]] = []
+    for w in wl or []:
+        try:
+            if int(w.get("kCGWindowLayer", 1)) != 0:
+                continue
+            b = w.get("kCGWindowBounds", {}) or {}
+            wd, ht = int(b.get("Width", 0)), int(b.get("Height", 0))
+            if wd < min_w or ht < min_h:
+                continue
+            out.append({"id": int(w.get("kCGWindowNumber", 0)),
+                        "app": str(w.get("kCGWindowOwnerName", "") or ""),
+                        "title": str(w.get("kCGWindowName", "") or ""),
+                        "w": wd, "h": ht})
+        except Exception:
+            continue
+    return out
+
+
+def capture_window(window_id: int, dest: str, *, max_width: int = 1280,
+                   timeout: float = 10.0) -> bool:
+    """Screenshot ONE window by id (occluded content included; no raise, no
+    shadow), downscaled. Returns success."""
+    sc = shutil.which("screencapture")
+    if not sc:
+        return False
+    try:
+        subprocess.run([sc, "-l", str(window_id), "-x", "-o", "-t", "jpg", dest],
+                       capture_output=True, timeout=timeout)
+        if not os.path.exists(dest):
+            return False
+        sips = shutil.which("sips")
+        if sips:
+            subprocess.run([sips, "--resampleWidth", str(max_width), dest],
+                           capture_output=True, timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+
+def window_read_instruction(app: str, title: str) -> str:
+    return (
+        f"This is a screenshot of a SINGLE application window — app '{app or '?'}'"
+        + (f", window title '{title[:120]}'" if title else "") + ".\n"
+        "In ONE sentence, describe WHAT CONTENT this window shows — the topic/"
+        "subject, key headlines, threads, or what the user has in it. Do not "
+        "describe other windows. Never transcribe passwords, secrets, tokens, "
+        "or full private messages. No preamble.")
+
+
 def render_survey(windows: list[dict[str, Any]]) -> str:
     """Compact one-line note: 'Chrome[3]: Reddit; Gmail; Docs · Code[1]: daemon.py'."""
     parts = []
@@ -120,16 +191,67 @@ class WindowSurveyor:
 
     def __init__(self, memory, *, interval_seconds: float = 600.0,
                  lull_seconds: float = 45.0, away_seconds: float = 300.0,
-                 time_fn=time.monotonic, list_fn=None):
+                 time_fn=time.monotonic, list_fn=None,
+                 job_queue=None, pixel_reads: bool = False,
+                 max_window_reads: int = 4, exclude_apps=None,
+                 spool_dir=None, ttl_seconds: float = 600.0,
+                 quartz_list_fn=None, capture_fn=None):
         self.memory = memory
         self.interval_seconds = float(interval_seconds)
         self.lull_seconds = float(lull_seconds)
         self.away_seconds = float(away_seconds)
         self._time_fn = time_fn
         self._list = list_fn or list_windows
+        # Tier-2 (Quartz) per-window pixel reads — deferred via the queue.
+        self.job_queue = job_queue
+        self.pixel_reads = bool(pixel_reads)
+        self.max_window_reads = int(max_window_reads)
+        self._exclude = {a.lower() for a in (exclude_apps or [])}
+        self._spool_dir = Path(spool_dir) if spool_dir else None
+        self.ttl_seconds = float(ttl_seconds)
+        self._qlist = quartz_list_fn or list_windows_quartz
+        self._capture = capture_fn or capture_window
         self._next_due = self._time_fn()   # eligible immediately on first lull
         self.surveys = 0
+        self.window_reads_queued = 0
         self.last: list[dict[str, Any]] = []
+
+    def _maybe_enqueue_window_reads(self) -> int:
+        """Capture the largest BACKGROUND windows (the foreground one is already
+        deep-read by the observer) and enqueue per-window VLM reads. Skips
+        excluded/sensitive apps. Returns how many were queued."""
+        if not (self.pixel_reads and self.job_queue is not None
+                and self._spool_dir is not None and quartz_available()):
+            return 0
+        wins = self._qlist()
+        if len(wins) <= 1:
+            return 0
+        # wins[0] is frontmost (observer covers it); rank the rest by area.
+        bg = [w for w in wins[1:] if w["app"].lower() not in self._exclude]
+        bg.sort(key=lambda w: w["w"] * w["h"], reverse=True)
+        queued = 0
+        try:
+            self._spool_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return 0
+        for w in bg[:self.max_window_reads]:
+            dest = str(self._spool_dir / f"win_{w['id']}_{int(time.time())}.spool.jpg")
+            if not self._capture(w["id"], dest):
+                continue
+            try:
+                self.job_queue.enqueue(
+                    "window_read",
+                    {"spool": dest, "app": w["app"], "title": w["title"]},
+                    priority=3, dedup_key=f"win:{w['app'].lower()}",
+                    not_after_ts=time.time() + self.ttl_seconds)
+                queued += 1
+            except Exception:
+                try:
+                    os.remove(dest)
+                except OSError:
+                    pass
+        self.window_reads_queued += queued
+        return queued
 
     def maybe_survey(self, *, idle: Optional[float],
                      present: Optional[bool]) -> dict[str, Any]:
@@ -152,7 +274,9 @@ class WindowSurveyor:
         record_survey(self.memory, windows)
         self.surveys += 1
         self.last = windows
+        queued = self._maybe_enqueue_window_reads()
         return {"surveyed": True, "n_apps": len(windows),
+                "window_reads": queued,
                 "summary": render_survey(windows)[:200]}
 
 
