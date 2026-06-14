@@ -10,3 +10,8 @@ numpy>=1.24  # optional (learned forward model — numpy fallback)
 # Optional — robust GPU-trained forward model on Apple silicon. When present,
 # the forward-model trainer uses MLX instead of the numpy MLP. Mac-only.
 mlx>=0.18  # optional (forward model, Apple silicon)
+# Optional — face identity (brain/face.py). Local ArcFace embeddings to
+# recognize individuals + attribute app usage per person. Only needed when
+# `face.enabled: true`; the whole feature no-ops cleanly without these.
+insightface>=0.7  # optional (face identity); pulls onnxruntime + opencv
+onnxruntime>=1.16  # optional (face identity backend)

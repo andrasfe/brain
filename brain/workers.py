@@ -79,7 +79,7 @@ class Worker(threading.Thread):
         self._close_ctx()
 
     def _close_ctx(self) -> None:
-        for key in ("memory", "llm"):
+        for key in ("memory", "llm", "face_store"):
             obj = (self._ctx or {}).get(key)
             try:
                 if obj is not None and hasattr(obj, "close"):
@@ -150,8 +150,23 @@ def run_wellness_check(payload: dict, ctx: dict) -> None:
         return
     model = (str((cfg.capture or {}).get("vision_model_strong", ""))
              or cfg.models.get("executive", ""))
+    log = ctx.get("log")
     try:
         reading = analyze_wellness(ctx["llm"], model, spool)
+        # Face identity: embed the same still (local, on-device) and record a
+        # sighting BEFORE the pixels are dropped. Best-effort, never blocks.
+        embedder = ctx.get("face_embedder")
+        store = ctx.get("face_store")
+        if embedder is not None and store is not None:
+            try:
+                import time as _t
+                emb = embedder.embed(spool)
+                if emb:
+                    iid = store.record_sighting(_t.time(), emb)
+                    if log:
+                        log(f"  👤 face sighting → Individual #{iid}")
+            except Exception:
+                pass
     finally:
         try:
             os.remove(spool)               # PIXEL-DROP, unconditionally
@@ -160,7 +175,6 @@ def run_wellness_check(payload: dict, ctx: dict) -> None:
     if reading is None:
         return
     record_wellness(ctx["memory"], reading)
-    log = ctx.get("log")
     if log:
         log(f"  🪞 wellness: mood={reading['mood']} fatigue={reading['fatigue']} "
             f"— {reading['summary'][:100]}")

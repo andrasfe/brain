@@ -92,6 +92,7 @@ class DaemonStats:
     digests_written: int = 0
     wellness_checks: int = 0
     surveys: int = 0
+    face_reclusters: int = 0
     pages_published: int = 0
     screen_model_trains: int = 0
     vision_rules_learned: int = 0
@@ -177,6 +178,11 @@ class BrainDaemon:
         # train the visual policy. Runs after the visual trainer each NREM bout.
         self.visual_replay = VisualReplay(
             min_rows=int(fm_cfg.get("min_rows", 40)))
+        # Face identity: re-cluster sightings + rebuild per-individual app
+        # profiles during NREM ("train while the screensaver's on"). No-ops
+        # when face.enabled is false or there are no sightings.
+        from brain.sleep.face_trainer import FaceTrainer
+        self.face_trainer = FaceTrainer(cfg)
         # Journalist: nightly digest of the day's activity (Recall's payoff).
         # At most one digest (one executive call) per NREM bout; idempotent.
         self.journalist = Journalist(
@@ -245,7 +251,28 @@ class BrainDaemon:
                     mem.conn.execute("PRAGMA journal_mode=WAL")
                 except Exception:
                     pass
+                # Face identity (optional): the heavy embedder loads once per
+                # worker thread; the store opens its own WAL connection. Built
+                # only when face.enabled — the wellness shot already passed the
+                # local-only privacy gate, so embedding it stays on-device.
+                face_embedder = None
+                face_store = None
+                fc = (_cfg.raw or {}).get("face") or {}
+                if fc.get("enabled"):
+                    from brain.face import FaceIdentityStore, make_face_embedder
+                    face_embedder = make_face_embedder(_cfg)
+                    if face_embedder is not None:
+                        face_store = FaceIdentityStore(
+                            _cfg.db_path,
+                            sim_threshold=float(fc.get("sim_threshold", 0.42)),
+                            merge_threshold=float(fc.get("merge_threshold", 0.5)),
+                            window_seconds=float(fc.get("window_seconds", 120)))
+                    else:
+                        self.log("  ⚠ face.enabled but embedder unavailable "
+                                 "(pip install insightface onnxruntime) — "
+                                 "identity off")
                 return {"cfg": _cfg, "llm": wllm, "memory": mem,
+                        "face_embedder": face_embedder, "face_store": face_store,
                         "log": lambda m: self.log(m)}
 
             self.worker = Worker(
@@ -745,6 +772,14 @@ class BrainDaemon:
                 self.stats.visual_replays += int(vr.get("n", 0) or 0)
             except Exception as e:
                 self.log(f"  ⚠ visual_replay failed: {type(e).__name__}: {e}")
+            # face identity: recluster sightings + rebuild per-individual app
+            # profiles ("train while away"). No camera here — pure consolidation.
+            try:
+                ft = self.face_trainer.run(log=lambda m: self.log(m))
+                if ft.get("ran"):
+                    self.stats.face_reclusters += 1
+            except Exception as e:
+                self.log(f"  ⚠ face trainer failed: {type(e).__name__}: {e}")
             # journalist: digest the most recent undigested completed day into
             # a journal entry (semantic memory + markdown). One LLM call max.
             try:

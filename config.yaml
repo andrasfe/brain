@@ -215,6 +215,24 @@ wellness:
   camera_device: "auto"       # auto-picks the most webcam-like device (skips
                               # capture cards / screen devices); or an index
 
+# Face identity — recognize the individuals who use this machine and attribute
+# app activity per person. Piggybacks on the wellness webcam still: computes a
+# LOCAL face embedding (InsightFace/ONNX, on-device) and records a sighting,
+# then DROPS the pixels like everything else. Unsupervised — no enrollment, no
+# names; sightings cluster into Individual #1/#2/… (label later via
+# `python -m brain.face --label ID NAME`). Heavy reclustering + per-individual
+# app-profile build runs during NREM ("train while away"), never at capture.
+# Needs `pip install insightface onnxruntime`. OFF by default (biometric).
+face:
+  enabled: false
+  backend: insightface        # insightface | (none disables)
+  model: buffalo_l            # InsightFace model pack (512-d ArcFace embeddings)
+  det_size: 640               # face-detector input size
+  min_det_score: 0.5          # ignore low-confidence detections
+  sim_threshold: 0.42         # cosine ≥ this → same individual (online assign)
+  merge_threshold: 0.5        # cosine ≥ this → merge clusters (recluster pass)
+  window_seconds: 120         # sighting↔observation time-join window for apps
+
 # Window survey — the brain's quiet 'rounds'. During a lull (you've stepped
 # back: idle past lull_seconds but the screensaver isn't on), ~every
 # interval_seconds it NON-DISRUPTIVELY enumerates every open app + its window

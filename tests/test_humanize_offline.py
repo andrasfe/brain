@@ -4605,5 +4605,88 @@ class StatusTests(unittest.TestCase):
         self.assertIn("BRAIN STATUS", txt)
 
 
+class FaceIdentityTests(unittest.TestCase):
+    """Unsupervised face clustering + per-individual app attribution. No model
+    needed — synthetic separable embeddings stand in for the face backend."""
+
+    def _store(self):
+        from brain.memory import Memory
+        from brain.face import FaceIdentityStore
+        tmp = Path(tempfile.mkdtemp()) / "face.sqlite"
+        Memory(tmp).close()                 # build the episodes schema
+        return FaceIdentityStore(tmp, sim_threshold=0.42, merge_threshold=0.5,
+                                 window_seconds=120)
+
+    @staticmethod
+    def _a(noise=0.0):
+        return [1.0 + noise, 0.05, 0.0, 0.0]
+
+    @staticmethod
+    def _b(noise=0.0):
+        return [0.05, 1.0 + noise, 0.0, 0.0]
+
+    def _obs(self, store, ts, app, active=True):
+        tags = f"app:{app}" + (",agency:active" if active else ",agency:passive")
+        store.conn.execute(
+            "INSERT INTO episodes (ts,task,kind,content,salience,mem_type,"
+            "affect_json,tags,embedding) VALUES (?,?,?,?,?,?,?,?,?)",
+            (ts, "screen_observation", "activity", f"[{app}] x", 0.5,
+             "observation", None, tags, None))
+        store.conn.commit()
+
+    def test_online_assignment_groups_same_person(self):
+        s = self._store()
+        i1 = s.record_sighting(100.0, self._a())
+        i2 = s.record_sighting(101.0, self._a(0.02))   # same individual
+        i3 = s.record_sighting(102.0, self._b())        # a different individual
+        self.assertEqual(i1, i2)
+        self.assertNotEqual(i1, i3)
+        self.assertEqual(s.count_sightings(), 3)
+        s.close()
+
+    def test_recluster_yields_two_stable_individuals(self):
+        s = self._store()
+        for ts, emb in [(1, self._a()), (2, self._b()), (3, self._a(0.01)),
+                        (4, self._b(0.01)), (5, self._a(0.02))]:
+            s.record_sighting(float(ts), emb)
+        rc = s.recluster()
+        self.assertEqual(rc["identities"], 2)
+        self.assertEqual(rc["sightings"], 5)
+        s.close()
+
+    def test_profiles_attribute_apps_by_time(self):
+        s = self._store()
+        ia = s.record_sighting(1000.0, self._a())
+        ib = s.record_sighting(2000.0, self._b())
+        self._obs(s, 1005.0, "slack", active=True)
+        self._obs(s, 1010.0, "slack", active=True)
+        self._obs(s, 2005.0, "chrome", active=True)
+        self._obs(s, 5000.0, "vscode", active=True)     # too far → unattributed
+        self._obs(s, 1006.0, "wellness", active=True)   # bookkeeping → excluded
+        self._obs(s, 1007.0, "terminal", active=False)  # passive → excluded
+        pr = s.build_profiles()
+        self.assertEqual(pr["attributed"], 3)
+        profs = {p["identity_id"]: p for p in s.profiles()}
+        self.assertEqual(profs[ia]["apps"].get("slack"), 2)
+        self.assertEqual(profs[ib]["apps"].get("chrome"), 1)
+        self.assertNotIn("vscode", profs[ia]["apps"])
+        self.assertNotIn("vscode", profs[ib]["apps"])
+        self.assertNotIn("wellness", profs[ia]["apps"])
+        s.close()
+
+    def test_label_survives_and_disabled_embedder_is_none(self):
+        from brain.face import make_face_embedder
+        s = self._store()
+        iid = s.record_sighting(1.0, self._a())
+        self.assertTrue(s.label_identity(iid, "Andras"))
+        s.build_profiles()
+        self.assertEqual(s.profiles()[0]["label"], "Andras")
+        s.close()
+
+        class _Cfg:
+            raw = {"face": {"enabled": False}}
+        self.assertIsNone(make_face_embedder(_Cfg()))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
