@@ -19,10 +19,11 @@ from .base import InputAdapter, StreamItem
 from .classifier import SalienceClassifier
 from .file_tail_adapter import FileTailAdapter
 from .stdin_adapter import StdinAdapter
+from .voice_adapter import VoiceAdapter
 from .webhook_adapter import WebhookAdapter
 
 __all__ = [
     "InputAdapter", "StreamItem",
     "SalienceClassifier",
-    "FileTailAdapter", "StdinAdapter", "WebhookAdapter",
+    "FileTailAdapter", "StdinAdapter", "VoiceAdapter", "WebhookAdapter",
 ]

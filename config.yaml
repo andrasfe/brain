@@ -233,6 +233,25 @@ face:
   merge_threshold: 0.5        # cosine ≥ this → merge clusters (recluster pass)
   window_seconds: 120         # sighting↔observation time-join window for apps
 
+# Voice input — talk to the brain, hands-free. WAKE-WORD GATED: the mic is only
+# used to listen for "hey brain"; nothing is recorded or transcribed until that
+# phrase fires. On a hit the brain says "I'm listening" (macOS say), captures
+# the next utterance, transcribes it LOCALLY (mlx-whisper, on-device), and feeds
+# it to the input pipeline as a direct task — then reads the reply back. A
+# voice-energy gate skips silent windows; every audio clip is dropped right
+# after transcription. Needs `pip install mlx-whisper` + mic permission for the
+# terminal. OFF by default.
+voice:
+  enabled: false
+  backend: mlx_whisper        # mlx_whisper | faster_whisper
+  model: ""                   # "" = backend default (whisper-base.en)
+  wake_word: "hey brain"
+  ack: "I'm listening"
+  listen_seconds: 2.0         # rolling wake-word window length
+  command_seconds: 6.0        # capture window after the wake word
+  energy_threshold: 300.0     # RMS below this = silence → recognizer skipped
+  device: ":0"                # avfoundation mic ('ffmpeg -f avfoundation' index)
+
 # Window survey — the brain's quiet 'rounds'. During a lull (you've stepped
 # back: idle past lull_seconds but the screensaver isn't on), ~every
 # interval_seconds it NON-DISRUPTIVELY enumerates every open app + its window

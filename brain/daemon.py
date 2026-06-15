@@ -384,6 +384,31 @@ class BrainDaemon:
         self._direct_buffer: list[StreamItem] = []
         self._ambient_buffer: list[StreamItem] = []
         self._buffer_opened_at: Optional[float] = None
+        # Voice input: "hey brain" wake-word → local Whisper → direct task.
+        # Listens for the wake phrase only (not ambient recording); speaks
+        # "I'm listening", captures the command, and feeds it to the input
+        # pipeline. Built when voice.enabled AND a local backend loads.
+        self.voice_adapter = None
+        vc = (cfg.raw or {}).get("voice") or {}
+        if vc.get("enabled"):
+            from brain.inputs import VoiceAdapter
+            from brain.voice import make_transcriber
+            tr = make_transcriber(cfg)
+            if tr is not None:
+                self.voice_adapter = VoiceAdapter(
+                    tr, wake_word=str(vc.get("wake_word", "hey brain")),
+                    ack=str(vc.get("ack", "I'm listening")),
+                    listen_seconds=float(vc.get("listen_seconds", 2.0)),
+                    command_seconds=float(vc.get("command_seconds", 6.0)),
+                    energy_threshold=float(vc.get("energy_threshold", 300.0)),
+                    device=str(vc.get("device", ":0")))
+                self.adapters.append(self.voice_adapter)
+                self.log("  🎙 voice input on (wake word: "
+                         f"\"{vc.get('wake_word', 'hey brain')}\")")
+            else:
+                self.log("  ⚠ voice.enabled but no local STT backend "
+                         "(pip install mlx-whisper) — voice off")
+
         # Bring adapters online
         for ad in self.adapters:
             try:
@@ -984,8 +1009,15 @@ class BrainDaemon:
 
         self.log(f"\n[wake] coalesced batch: {len(direct)} direct + "
                  f"{len(ambient)} ambient items")
-        self._run_task_with_persistent_affect(task_text)
+        answer = self._run_task_with_persistent_affect(task_text)
         self.stats.tasks_processed += 1
+        # Voice loop: if a spoken command drove this batch, read the reply back.
+        if (answer and self.voice_adapter is not None
+                and any(it.metadata.get("voice") for it in direct)):
+            try:
+                self.voice_adapter.speak(answer)
+            except Exception:
+                pass
 
         # Bury the rest of ambient (beyond the top 5) as low-sal episodic so
         # they're still recallable later but don't keep crowding the prompt.
@@ -1047,6 +1079,7 @@ class BrainDaemon:
             self.brain.cfg.loop = original_loop
             self.brain.log = original_log
             self._append_task_history(task, answer)
+        return answer
 
     def _append_task_history(self, task: str, answer: Optional[str]) -> None:
         """Task lifecycle visibility for the web UI: every processed task and

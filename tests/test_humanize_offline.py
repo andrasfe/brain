@@ -4712,5 +4712,87 @@ class FaceIdentityTests(unittest.TestCase):
         self.assertIsNone(make_face_embedder(_Cfg()))
 
 
+class VoiceTests(unittest.TestCase):
+    def test_wake_word_exact_and_inline_command(self):
+        from brain.voice import detect_wake_word
+        self.assertEqual(detect_wake_word("hey brain what time is it"),
+                         "what time is it")
+        self.assertEqual(detect_wake_word("Hey Brain, summarize my day."),
+                         "summarize my day")
+        self.assertEqual(detect_wake_word("hey brain"), "")   # spoken alone
+
+    def test_wake_word_tolerates_mishearings(self):
+        from brain.voice import detect_wake_word
+        # Whisper commonly mishears "brain"
+        self.assertEqual(detect_wake_word("hey brian open mail"), "open mail")
+        self.assertEqual(detect_wake_word("hay brane what's up"), "what s up")
+
+    def test_no_wake_word_returns_none(self):
+        from brain.voice import detect_wake_word
+        self.assertIsNone(detect_wake_word("the weather is nice today"))
+        self.assertIsNone(detect_wake_word(""))
+
+    def test_disabled_transcriber_is_none(self):
+        from brain.voice import make_transcriber
+
+        class _Cfg:
+            raw = {"voice": {"enabled": False}}
+        self.assertIsNone(make_transcriber(_Cfg()))
+
+    def test_adapter_emits_command_and_acks(self):
+        from brain.inputs.voice_adapter import VoiceAdapter
+        spoken = []
+        # fake: a window transcribes to a wake-word + inline command
+        ad = VoiceAdapter(
+            transcriber=object(),                 # non-None so .start() would run
+            record_fn=lambda dest, secs: True,
+            transcribe_fn=lambda wav: "hey brain what's on my calendar",
+            speak_fn=lambda text: spoken.append(text),
+            energy_fn=lambda wav: 9999.0)         # above threshold
+        item = ad._listen_once()
+        self.assertIsNotNone(item)
+        self.assertEqual(item.content, "what s on my calendar")
+        self.assertEqual(item.channel, "direct")
+        self.assertEqual(item.source, "voice")
+        self.assertTrue(item.metadata.get("voice"))
+        self.assertEqual(spoken, ["I'm listening"])   # acknowledged
+
+    def test_adapter_skips_silence_and_non_wake(self):
+        from brain.inputs.voice_adapter import VoiceAdapter
+        # silent window: energy below threshold → recognizer never consulted
+        calls = {"n": 0}
+
+        def _tr(_wav):
+            calls["n"] += 1
+            return "hey brain do something"
+
+        silent = VoiceAdapter(transcriber=object(),
+                              record_fn=lambda d, s: True, transcribe_fn=_tr,
+                              speak_fn=lambda t: None,
+                              energy_fn=lambda wav: 10.0)   # silence
+        self.assertIsNone(silent._listen_once())
+        self.assertEqual(calls["n"], 0)
+        # speech but no wake word → None, no command queued
+        chatter = VoiceAdapter(transcriber=object(),
+                               record_fn=lambda d, s: True,
+                               transcribe_fn=lambda wav: "just talking to myself",
+                               speak_fn=lambda t: None,
+                               energy_fn=lambda wav: 9999.0)
+        self.assertIsNone(chatter._listen_once())
+
+    def test_adapter_two_phase_capture_when_wake_alone(self):
+        from brain.inputs.voice_adapter import VoiceAdapter
+        # first window = wake word alone; second capture = the command
+        outs = iter(["hey brain", "remind me to call mom"])
+        ad = VoiceAdapter(transcriber=object(),
+                          record_fn=lambda d, s: True,
+                          transcribe_fn=lambda wav: next(outs),
+                          speak_fn=lambda t: None,
+                          energy_fn=lambda wav: 9999.0)
+        item = ad._listen_once()
+        self.assertIsNotNone(item)
+        self.assertEqual(item.content, "remind me to call mom")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

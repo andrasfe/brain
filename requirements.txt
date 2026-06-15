@@ -15,3 +15,7 @@ mlx>=0.18  # optional (forward model, Apple silicon)
 # `face.enabled: true`; the whole feature no-ops cleanly without these.
 insightface>=0.7  # optional (face identity); pulls onnxruntime + opencv
 onnxruntime>=1.16  # optional (face identity backend)
+# Optional — voice input (brain/voice.py). Local wake-word speech recognition
+# ("hey brain"). Only needed when `voice.enabled: true`; no-ops without it.
+# mlx-whisper is Apple-silicon native; faster-whisper is the cross-platform alt.
+mlx-whisper>=0.4  # optional (voice input, Apple silicon)
