@@ -76,7 +76,15 @@ class ScreenSequenceTrainer:
             return emb(row["content"])
 
         import numpy as np
-        X, Y = [], []
+        from collections import Counter
+        # Collect candidate transitions first. Embeddings can live in DIFFERENT
+        # spaces — DINOv2 image vectors for rows captured while visual_embed was
+        # on, text vectors otherwise — so dimensions vary ACROSS pairs even
+        # though va/vb match WITHIN a pair. Training one model needs a single
+        # homogeneous space, so lock onto the dominant dim and drop the rest
+        # (stacking ragged vectors would otherwise raise an inhomogeneous-shape
+        # ValueError, and mixing image/text spaces is meaningless anyway).
+        cands = []  # (va, vb, hour)
         for a, b in zip(rows, rows[1:]):
             if (b["ts"] - a["ts"]) > self.max_gap_seconds:
                 continue  # don't pair across a gap (sleep/away)
@@ -84,8 +92,21 @@ class ScreenSequenceTrainer:
             if va is None or vb is None or len(va) != len(vb):
                 continue
             hour = time.localtime(a["ts"]).tm_hour + time.localtime(a["ts"]).tm_min / 60.0
+            cands.append((va, vb, hour))
+        if not cands:
+            log("  screen_model: no usable transitions; skipping")
+            return {"trained": False, "reason": "insufficient pairs", "pairs": 0}
+        target_dim = Counter(len(va) for va, _, _ in cands).most_common(1)[0][0]
+        X, Y = [], []
+        for va, vb, hour in cands:
+            if len(va) != target_dim or len(vb) != target_dim:
+                continue
             X.append(np.concatenate([va, np.asarray(time_features(hour), np.float32)]))
             Y.append(vb)
+        dropped = len(cands) - len(X)
+        if dropped:
+            log(f"  screen_model: training on {len(X)} pairs at dim {target_dim}; "
+                f"dropped {dropped} pair(s) in other embedding spaces")
         if len(X) < self.min_pairs:
             log(f"  screen_model: {len(X)} usable pairs (< {self.min_pairs}); skipping")
             return {"trained": False, "reason": "insufficient pairs", "pairs": len(X)}

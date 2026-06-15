@@ -4358,6 +4358,30 @@ class SequenceTrainerTests(unittest.TestCase):
         self.assertFalse(stats["trained"])
         m.close()
 
+    def test_trainer_survives_mixed_embedding_dims(self):
+        # Regression: rows carry embeddings from DIFFERENT spaces (DINOv2 image
+        # vecs vs text vecs) → ragged vectors that used to crash np.asarray with
+        # 'inhomogeneous shape'. The trainer must lock onto the dominant dim and
+        # train, not raise.
+        import struct
+        import time as _t
+        from brain.sleep import ScreenSequenceTrainer
+        m = self._mem_with_obs(60)            # 60 dense-text (dim 8) rows
+        base = _t.time() + 10_000
+        for i in range(8):                    # a few rows with a 16-dim "image" vec
+            rid = m.store("screen", "activity", f"img{i}", 0.4,
+                          mem_type="observation")
+            blob = struct.pack("<I16f", 16, *[0.1 * (i + j) for j in range(16)])
+            m.conn.execute("UPDATE episodes SET ts=?, embedding=? WHERE id=?",
+                           (base + i * 30, blob, rid))
+        m.conn.commit()
+        ckpt = Path(tempfile.mkdtemp()) / "screen_model"
+        stats = ScreenSequenceTrainer(backend="numpy", epochs=10,
+                                      min_pairs=20).run(
+            m, checkpoint=ckpt, log=lambda _x: None)
+        self.assertTrue(stats["trained"])     # dominant dim-8 set still trains
+        m.close()
+
 
 class PresenceAndDedupTests(unittest.TestCase):
     def _cfg(self):
